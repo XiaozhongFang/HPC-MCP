@@ -1,0 +1,39 @@
+# HPC-MCP 示例配置
+# 优先级: CLI > 环境变量 (HPC_MCP_*) > 本文件 > 默认值
+
+host: my-hpc                 # 推荐对应 ~/.ssh/config 中的 Host 别名
+user: shared_account
+root: /home/shared_account/fangxiaozhong   # 必须：Agent 被限制在此目录内
+
+# identity_file: ~/.ssh/id_ed25519
+
+ssh:
+  port: 22
+  connect_timeout: 15
+  command_timeout: 30
+
+slurm:
+  # 默认空 = 拒绝一切提交（fail-closed），务必按需配置
+  allowed_partitions:
+    - compute
+  max_nodes: 2
+  max_cpus: 64
+  max_memory_mb: 262144      # 256 GiB
+  max_gpus: 4
+  max_time: "24:00:00"
+  max_concurrent_jobs: 20
+
+shell:
+  # 在内置最小白名单基础上追加的允许命令（谨慎）
+  safe_commands: []
+  max_exec_seconds: 30
+  max_output_bytes: 1048576
+
+files:
+  max_read_bytes: 1048576    # 1 MiB
+  max_write_bytes: 10485760  # 10 MiB
+  max_list_entries: 2000
+
+# wait_max_seconds: 3600
+# log_file: ~/.local/share/hpc-mcp/hpc-mcp.log
+# log_level: INFO

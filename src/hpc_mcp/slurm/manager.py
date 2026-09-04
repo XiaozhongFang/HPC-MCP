@@ -129,7 +129,6 @@ class SlurmManager:
         return res
 
     def _render_script(self, *, job_name, cwd, cmd_argv, eff, environment) -> str:
-        job_dir_placeholder = "$(scontrol show job $SLURM_JOB_ID | true)"  # unused; keep script simple
         lines = [
             "#!/bin/bash",
             f"#SBATCH --job-name={job_name}",
