@@ -2,6 +2,8 @@
 
 一个**安全优先**的 MCP Server，让 VS Code 中的 Codex、Reasonix 等 Coding Agent 通过 SSH + Slurm 安全地操作远程 HPC 集群。
 
+> **第一次用？先看 → [docs/QUICKSTART.md](docs/QUICKSTART.md)**：手把手的安装、每个参数的说明、完整的 Codex/Reasonix 配置示例，以及“启动后卡住”“网络不通”“pip 装成 UNKNOWN”等常见问题的排查表。
+
 ## 架构
 
 ```text
