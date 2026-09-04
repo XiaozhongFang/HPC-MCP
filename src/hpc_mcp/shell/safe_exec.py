@@ -8,8 +8,10 @@ runs with a hard timeout and output cap.
 
 from __future__ import annotations
 
+import shlex
+
 from ..config import Config
-from ..errors import CommandPolicyError, RemoteCommandError
+from ..errors import CommandPolicyError
 from ..security.command_policy import check_command
 from ..security.path_policy import is_within, validate_path
 from ..ssh.manager import SshManager
@@ -25,6 +27,18 @@ class SafeExec:
         argv = check_command(command, cfg.shell.safe_commands)
         if not argv:
             raise CommandPolicyError("Empty command", requested=command)
+
+        # Path operands must stay inside the sandbox too: the command
+        # whitelist constrains *which program* runs, but without this check
+        # `cat /etc/passwd` or `find /` would read outside the user root.
+        for token in argv[1:]:
+            if token.startswith("-"):
+                # flags may embed a path (e.g. --file=/x); check the value part
+                _, eq, val = token.partition("=")
+                if eq and val.startswith("/"):
+                    self._check_operand(val, command)
+            elif token.startswith("/"):
+                self._check_operand(token, command)
 
         if cwd is not None:
             # cwd must stay inside the sandbox; realpath-verify to stop
@@ -45,8 +59,6 @@ class SafeExec:
         timeout = min(timeout or cfg.shell.max_exec_seconds, cfg.shell.max_exec_seconds)
         max_out = cfg.shell.max_output_bytes
 
-        import shlex
-
         quoted = " ".join(shlex.quote(a) for a in argv)
         remote = f"cd {shlex.quote(real_cwd)} && timeout {int(timeout)} {quoted}"
         res = await self._ssh.run_raw(
@@ -63,3 +75,13 @@ class SafeExec:
             result["timed_out"] = True
             result["stderr"] += f"\n[killed after {timeout}s timeout]"
         return result
+
+    def _check_operand(self, path_token: str, command: str) -> None:
+        try:
+            validate_path(path_token, self._cfg.root)
+        except Exception as exc:
+            raise CommandPolicyError(
+                f"Path operand {path_token!r} escapes the configured user root",
+                requested=command,
+                scope=self._cfg.root,
+            ) from exc

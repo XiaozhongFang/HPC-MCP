@@ -81,6 +81,9 @@ class SshConfig:
     identity_file: str | None = None
     connect_timeout: int = DEFAULT_CONNECT_TIMEOUT
     command_timeout: int = DEFAULT_COMMAND_TIMEOUT
+    # StrictHostKeyChecking: "yes" (pinned known_hosts) is the safe default;
+    # "accept-new" tolerates first-contact key enrollment.
+    strict_host_key_checking: str = "yes"
 
 
 @dataclass
@@ -233,7 +236,17 @@ def build_config(cli_args: Any | None = None, environ: dict[str, str] | None = N
         command_timeout=_coalesce(
             _env_int("COMMAND_TIMEOUT"), ssh_file.get("command_timeout"), default=DEFAULT_COMMAND_TIMEOUT
         ),
+        strict_host_key_checking=_coalesce(
+            _env("STRICT_HOST_KEY_CHECKING"),
+            ssh_file.get("strict_host_key_checking"),
+            default="yes",
+        ),
     )
+    if ssh.strict_host_key_checking not in ("yes", "accept-new", "no"):
+        raise ConfigError(
+            "ssh.strict_host_key_checking must be 'yes', 'accept-new' or 'no', "
+            f"got {ssh.strict_host_key_checking!r}"
+        )
     if ssh.host is None:
         raise ConfigError(
             "No HPC host configured.\n\n"

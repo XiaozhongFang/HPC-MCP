@@ -141,6 +141,8 @@ Host my-hpc
 
 Agent 永远不会接触私钥内容。
 
+默认 `StrictHostKeyChecking=yes`：首次连接请先手动 `ssh my-hpc` 确认主机指纹并写入 `known_hosts`；如确需首次自动登记，可在配置中设 `ssh.strict_host_key_checking: accept-new`。
+
 ### 连通性自检
 
 ```bash

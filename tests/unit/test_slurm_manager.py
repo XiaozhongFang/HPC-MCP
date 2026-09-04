@@ -40,6 +40,10 @@ class FakeSsh:
         if argv[:2] == ["cat", f"{ROOT}/.hpc-mcp/tracked_jobs.json"]:
             return RemoteResult(stdout=json.dumps(self.register).encode(), stderr=b"", exit_code=0)
         if argv[0] == "squeue":
+            if "-j" in argv:
+                jid = argv[argv.index("-j") + 1]
+                out = f"{jid}\n" if jid in self.states else ""
+                return RemoteResult(stdout=out.encode(), stderr=b"", exit_code=0)
             lines = [f"{jid} {st}" for jid, st in self.states.items()]
             return RemoteResult(stdout=("\n".join(lines)).encode(), stderr=b"", exit_code=0)
         if argv[0] == "sacct":

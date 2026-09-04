@@ -219,9 +219,16 @@ def _vet_arguments(base: str, argv: list[str]) -> str | None:
         if not args:
             return None
         readonly_sub = {
-            "status", "diff", "log", "branch", "rev-parse", "show", "ls-files",
-            "ls-tree", "blame", "describe", "remote", "tag", "shortlog",
-            "grep", "stash", "cat-file", "name-only",
+            "status", "diff", "log", "rev-parse", "show", "ls-files",
+            "ls-tree", "blame", "describe", "shortlog",
+            "grep", "cat-file", "name-only",
+        }
+        # Subcommands allowed only without mutating flags:
+        flag_gated = {
+            "branch": {"-d", "-D", "-m", "-M", "-c", "-C", "--delete", "--move", "--copy", "--edit-description", "--unset-upstream", "--set-upstream-to", "-u"},
+            "tag": {"-d", "-a", "-m", "-s", "-f", "--delete"},
+            "remote": {"add", "remove", "rm", "rename", "set-url", "set-head", "set-branches", "prune", "update"},
+            "stash": {"drop", "pop", "apply", "clear", "push", "save"},
         }
         mutating_sub = {
             "add", "commit", "push", "pull", "fetch", "clone", "checkout",
@@ -231,8 +238,13 @@ def _vet_arguments(base: str, argv: list[str]) -> str | None:
         sub = next((a for a in args if not a.startswith("-")), None)
         if sub in mutating_sub:
             return f"'git {sub}' mutates repository state and is not allowed from the agent"
-        if sub is not None and sub not in readonly_sub:
+        if sub is not None and sub not in readonly_sub and sub not in flag_gated:
             return f"git subcommand {sub!r} is not on the read-only allow-list"
+        if sub in flag_gated:
+            rest = args[args.index(sub) + 1:]
+            for a in rest:
+                if a in flag_gated[sub]:
+                    return f"'git {sub} {a}' mutates repository state and is not allowed"
         # git -c foo=bar and --exec-path can execute arbitrary commands
         for a in args:
             if a == "-c" or a.startswith("-c") or a.startswith("--exec-path"):

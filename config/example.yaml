@@ -11,6 +11,9 @@ ssh:
   port: 22
   connect_timeout: 15
   command_timeout: 30
+  # StrictHostKeyChecking: "yes" 要求 known_hosts 已固定主机密钥（推荐，
+  # 先用 ssh 手动连一次确认指纹）；"accept-new" 允许首次连接自动登记。
+  strict_host_key_checking: "yes"
 
 slurm:
   # 默认空 = 拒绝一切提交（fail-closed），务必按需配置

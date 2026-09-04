@@ -35,7 +35,7 @@ class SftpClient:
             "-b", "-",  # batch mode from stdin
             "-o", "BatchMode=yes",
             "-o", f"ConnectTimeout={cfg.connect_timeout}",
-            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", f"StrictHostKeyChecking={cfg.strict_host_key_checking}",
             "-o", "NumberOfPasswordPrompts=0",
         ]
         if cfg.port and cfg.port != 22:

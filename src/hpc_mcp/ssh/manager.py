@@ -68,7 +68,7 @@ class SshManager:
             "-o", f"ConnectTimeout={cfg.connect_timeout}",
             "-o", "ServerAliveInterval=15",
             "-o", "ServerAliveCountMax=2",
-            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", f"StrictHostKeyChecking={cfg.strict_host_key_checking}",
             "-o", "NumberOfPasswordPrompts=0",
         ]
         # Connection sharing (speeds up bursts of short commands)

@@ -107,3 +107,34 @@ class TestDelete:
         fs = FileService(make_cfg(), FakeSsh())
         with pytest.raises(PathSandboxError, match="user root"):
             await fs.delete(ROOT)
+
+
+@pytest.mark.asyncio
+class TestShellOperandSandbox:
+    """shell.run_safe must sandbox absolute path operands, not only cwd."""
+
+    async def _run(self, command: str):
+        from hpc_mcp.shell.safe_exec import SafeExec
+
+        class FakeSsh2(FakeSsh):
+            async def run_raw(self, cmd, **kw):
+                return RemoteResult(stdout=b"ok\n", stderr=b"", exit_code=0)
+
+        se = SafeExec(make_cfg(), FakeSsh2())
+        return await se.run(command, cwd=ROOT)
+
+    async def test_cat_etc_denied(self):
+        from hpc_mcp.errors import CommandPolicyError
+
+        with pytest.raises(CommandPolicyError, match="escapes"):
+            await self._run("cat /etc/passwd")
+
+    async def test_find_root_denied(self):
+        from hpc_mcp.errors import CommandPolicyError
+
+        with pytest.raises(CommandPolicyError):
+            await self._run("find / -maxdepth 1")
+
+    async def test_grep_inside_ok(self):
+        out = await self._run(f"grep -rn TODO {ROOT}/project")
+        assert out["exit_code"] == 0
