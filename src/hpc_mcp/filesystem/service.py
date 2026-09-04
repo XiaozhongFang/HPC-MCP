@@ -99,10 +99,13 @@ class FileService:
             limits.check_read_size(size, cap)
 
         fetch = cap + 1
-        # dd with base64 to transfer raw bytes safely over the exec channel
+        # dd with base64 to transfer raw bytes safely over the exec channel;
+        # refuse symlinks in the same invocation to close the stat-then-read
+        # TOCTOU window on shared accounts.
         argv = [
             "sh", "-c",
-            f"dd if={_q(real)} bs=1 skip={int(offset)} count={fetch} status=none | base64 -w0",
+            f"test ! -L {_q(real)} && dd if={_q(real)} bs=1 skip={int(offset)} "
+            f"count={fetch} status=none | base64 -w0",
         ]
         res = await self._ssh.run(argv, check=True, max_output=int(cap * 1.4) + 4096)
         data = base64.b64decode(res.stdout.strip() or b"")

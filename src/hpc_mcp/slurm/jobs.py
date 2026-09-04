@@ -53,8 +53,12 @@ class JobTracker:
         payload = json.dumps(data, indent=2)
         import shlex
 
+        q = shlex.quote(self._register_file)
+        # noclobber + refuse symlinks: a planted symlink at the register path
+        # must never turn register() into an arbitrary file overwrite.
         await self._ssh.run(
-            ["sh", "-c", f"cat > {shlex.quote(self._register_file)} <<'HPCMCP_EOF'\n{payload}\nHPCMCP_EOF"],
+            ["sh", "-c",
+             f"test ! -L {q} && cat > {q} <<'HPCMCP_EOF'\n{payload}\nHPCMCP_EOF"],
             check=True,
         )
 

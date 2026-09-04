@@ -103,6 +103,23 @@ class SlurmManager:
         if not _JOB_ID_RE.match(job_id):
             raise RemoteCommandError(f"Could not parse sbatch job id from: {res.stdout_text!r}")
 
+        # Cross-check with Slurm itself: never register a job ID we cannot
+        # confirm actually exists and belongs to this submission (defends
+        # against a tampered remote sbatch wrapper minting fake ownership).
+        verify = await self._ssh.run(
+            ["squeue", "-h", "-j", job_id, "-o", "%i"], check=False
+        )
+        seen = {ln.strip() for ln in verify.stdout_text.splitlines() if ln.strip()}
+        if verify.exit_code != 0 or job_id not in seen:
+            acct = await self._ssh.run(
+                ["sacct", "-j", job_id, "-n", "-X", "-o", "JobID"], check=False
+            )
+            seen_acct = {ln.strip().split(".")[0] for ln in acct.stdout_text.splitlines() if ln.strip()}
+            if job_id not in seen_acct:
+                raise RemoteCommandError(
+                    f"sbatch returned job id {job_id} but Slurm does not know it; refusing to track it"
+                )
+
         job_dir = f"{self._cfg.jobs_dir}/{job_id}"
         await self._ssh.run(["mkdir", "-p", "--", job_dir], check=True)
         await self._tracker.register(

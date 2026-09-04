@@ -183,10 +183,25 @@ class TestGitReadOnly:
             "git --exec-path=/tmp status",
             "git --git-dir=/etc status",
             "git config user.name x",
+            "git branch -d feature",
+            "git branch -D feature",
+            "git tag -d v1.0",
+            "git tag -a v2 -m msg",
+            "git remote add evil ssh://x",
+            "git remote set-url origin ssh://x",
+            "git stash drop",
+            "git stash pop",
         ],
     )
     def test_git_mutating_denied(self, cmd: str) -> None:
         assert classify(cmd, SAFE).verdict is Verdict.DENY, f"{cmd!r} was ALLOWED"
+
+    @pytest.mark.parametrize(
+        "cmd",
+        ["git branch", "git branch -a", "git branch -v", "git tag", "git tag -l", "git remote", "git remote -v", "git stash list"],
+    )
+    def test_git_readonly_variants_allowed(self, cmd: str) -> None:
+        assert classify(cmd, SAFE).verdict is Verdict.ALLOW, f"{cmd!r} denied"
 
 
 class TestModuleAndScontrol:
