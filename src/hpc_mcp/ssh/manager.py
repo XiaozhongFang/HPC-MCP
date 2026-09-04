@@ -224,7 +224,13 @@ class SshManager:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
-            raise SshError(f"Remote command timed out after {timeout}s: {remote_cmd[:200]}") from exc
+            raise SshError(
+                f"连接 {self._cfg.ssh.host}:{self._cfg.ssh.port} 超时（{timeout}s 内无响应）。\n\n"
+                "原因：很可能是网络不通——目标主机不可达（内网地址需连 VPN / 配跳板机），"
+                "或防火墙拦截。\n\n"
+                f"请手动验证：ssh -p {self._cfg.ssh.port} {self._cfg.ssh.host} \"echo ok\"\n"
+                f"(触发命令: {remote_cmd[:160]})"
+            ) from exc
 
         stdout = stdout_task.result()
         stderr = stderr_task.result()
@@ -232,10 +238,8 @@ class SshManager:
         result = RemoteResult(stdout=stdout, stderr=stderr, exit_code=proc.returncode or 0)
 
         if proc.returncode == 255:
-            # ssh-level failure (connection/auth/host-key)
-            raise SshError(
-                f"SSH to {self._cfg.ssh.host} failed: {result.stderr_text.strip()[:400]}"
-            )
+            # ssh-level failure (connection/auth/host-key) -> 翻译成可操作的诊断
+            raise SshError(self._diagnose_ssh_failure(result.stderr_text))
         if check and result.exit_code != 0:
             raise RemoteCommandError(
                 f"Remote command failed (exit {result.exit_code}): {remote_cmd[:200]}\n"
@@ -245,6 +249,55 @@ class SshManager:
         return result
 
     # -- helpers -------------------------------------------------------------
+
+    def _diagnose_ssh_failure(self, stderr: str) -> str:
+        """Translate raw OpenSSH stderr into an actionable, plain-language message."""
+        host = self._cfg.ssh.host or "?"
+        port = self._cfg.ssh.port
+        raw = stderr.strip()[:400]
+        low = raw.lower()
+
+        header = f"无法连接到 HPC（{host}:{port}）。"
+        if "connection timed out" in low or "no route to host" in low or "timeout" in low:
+            return (
+                f"{header}\n\n原因：网络不通——主机不可达或连接超时。\n\n"
+                "请检查：\n"
+                f"  1. {host} 是否为内网地址？需要连接 VPN / 校园网后再试。\n"
+                f"  2. 是否需要跳板机？在 ~/.ssh/config 里配置 ProxyJump。\n"
+                f"  3. 手动验证：ssh -p {port} {host} \"echo ok\" 能否连通。\n\n"
+                f"原始错误：{raw}"
+            )
+        if "connection refused" in low:
+            return (
+                f"{header}\n\n原因：目标主机拒绝了 {port} 端口连接（SSH 服务未运行或端口不对）。\n\n"
+                "请检查：\n"
+                "  1. 端口号是否正确（默认 22）。\n"
+                "  2. 集群 SSH 服务是否在运行 / 是否需要走跳板。\n\n"
+                f"原始错误：{raw}"
+            )
+        if "permission denied" in low:
+            return (
+                f"{header}\n\n原因：认证失败（没有可用的免密登录）。\n\n"
+                "请配置 SSH 公钥免密：\n"
+                f"  ssh-copy-id -p {port} {host}\n"
+                "或在 ~/.ssh/config 中指定 IdentityFile。\n\n"
+                f"原始错误：{raw}"
+            )
+        if "host key verification failed" in low:
+            return (
+                f"{header}\n\n原因：主机密钥未固定（StrictHostKeyChecking=yes 时拒绝首次未知主机）。\n\n"
+                "请先手动连接一次确认指纹并写入 known_hosts：\n"
+                f"  ssh -p {port} {host}\n"
+                "或在配置中设 ssh.strict_host_key_checking: accept-new（仅信任环境）。\n\n"
+                f"原始错误：{raw}"
+            )
+        if "could not resolve hostname" in low or "name or service not known" in low:
+            return (
+                f"{header}\n\n原因：无法解析主机名（{host}）。\n\n"
+                "请检查主机名拼写，或在 ~/.ssh/config 里用 Host 别名映射到真实地址。\n\n"
+                f"原始错误：{raw}"
+            )
+        return f"{header}\n\n原始错误：{raw}"
 
     async def probe(self) -> dict[str, str]:
         """Connectivity + environment probe used by --check and hpc.info."""
