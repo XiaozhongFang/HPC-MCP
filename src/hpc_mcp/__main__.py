@@ -33,6 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--port", type=int, metavar="PORT", help="SSH port (default 22)")
     p.add_argument("--user", metavar="USER", help="SSH user (may be a shared account)")
     p.add_argument("--root", metavar="PATH", help="Remote user root directory the agent is confined to (required)")
+    p.add_argument("--local-root", metavar="PATH", help="Local directory allowed for upload/download (default: current directory)")
     p.add_argument("--identity-file", metavar="PATH", help="SSH identity file (default from ~/.ssh/config)")
     p.add_argument("--log-file", metavar="PATH", help="Append logs to this file (in addition to stderr)")
     p.add_argument("--log-level", metavar="LEVEL", help="Log level (DEBUG, INFO, WARNING; default INFO)")
@@ -50,8 +51,15 @@ def _cmd_check(cfg) -> int:
 
     log = get_logger()
     mgr = SshManager(cfg)
+
+    async def probe_and_close():
+        try:
+            return await mgr.probe()
+        finally:
+            await mgr.close()
+
     try:
-        info = asyncio.run(mgr.probe())
+        info = asyncio.run(probe_and_close())
     except HpcMcpError as exc:
         print(f"Connection check FAILED: {exc}", file=sys.stderr)
         return 1

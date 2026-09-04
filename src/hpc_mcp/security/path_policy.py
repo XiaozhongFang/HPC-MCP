@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import posixpath
 import re
+from pathlib import Path
 
 from ..errors import PathSandboxError
 
@@ -36,6 +37,9 @@ from ..errors import PathSandboxError
 _FORBIDDEN_CHARS = re.compile(r"[\x00\r\n]")
 
 _LEXICAL_SCOPE = "paths inside the configured user root"
+_SENSITIVE_LOCAL_NAMES = {
+    ".ssh", ".env", ".netrc", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
+}
 
 
 def normalize_lexical(path: str, user_root: str) -> str:
@@ -44,6 +48,8 @@ def normalize_lexical(path: str, user_root: str) -> str:
     Returns the normalized absolute path.  Raises :class:`PathSandboxError`
     on any violation.  This function performs no I/O.
     """
+    if not isinstance(user_root, str) or not user_root.startswith("/") or posixpath.normpath(user_root) == "/":
+        raise PathSandboxError("Configured user root must be a dedicated absolute directory", scope=user_root)
     if not isinstance(path, str) or not path:
         raise PathSandboxError("Path must be a non-empty string")
     if _FORBIDDEN_CHARS.search(path):
@@ -81,16 +87,67 @@ def normalize_lexical(path: str, user_root: str) -> str:
 
 def is_within(path: str, user_root: str) -> bool:
     """True iff normalized absolute ``path`` equals or sits under ``user_root``."""
+    if not isinstance(path, str) or not isinstance(user_root, str):
+        return False
+    if not path.startswith("/") or not user_root.startswith("/"):
+        return False
     root = posixpath.normpath(user_root)
-    if path == root:
+    normalized = posixpath.normpath(path)
+    if root == "/":
+        return False
+    if normalized == root:
         return True
     prefix = root if root.endswith("/") else root + "/"
-    return path.startswith(prefix)
+    return normalized.startswith(prefix)
 
 
 def validate_path(path: str, user_root: str) -> str:
     """Full lexical validation entry point.  Returns the normalized path."""
     return normalize_lexical(path, user_root)
+
+
+def validate_local_path(path: str, local_root: str, *, for_write: bool = False) -> str:
+    """Resolve a local transfer path under ``local_root`` without symlinks.
+
+    Uploads must name a regular file and downloads must target an existing
+    directory tree.  Refusing symlink components prevents an agent from using
+    a transfer as a local secret read or arbitrary overwrite primitive.
+    """
+    if not isinstance(path, str) or not path or _FORBIDDEN_CHARS.search(path):
+        raise PathSandboxError("Local path must be a non-empty path without control characters", requested=str(path), scope=local_root)
+    root = Path(local_root).expanduser().resolve(strict=True)
+    candidate = Path(path).expanduser()
+    candidate_abs = candidate if candidate.is_absolute() else root / candidate
+    # Inspect the user-supplied path before resolving it; otherwise a symlink
+    # to another in-root file would disappear from the check.
+    current = root
+    try:
+        relative_candidate = candidate_abs.relative_to(root)
+    except ValueError as exc:
+        raise PathSandboxError("Local path escapes the configured local root", requested=path, scope=str(root)) from exc
+    for part in relative_candidate.parts:
+        current = current / part
+        if current.is_symlink():
+            raise PathSandboxError("Symlink components are not allowed for local transfers", requested=path, scope=str(root))
+    resolved = candidate_abs.resolve(strict=False)
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise PathSandboxError("Local path escapes the configured local root", requested=path, scope=str(root)) from exc
+
+    parts_to_check = list(resolved.relative_to(root).parts)
+    parent_parts = parts_to_check if for_write else parts_to_check[:-1]
+    current = root
+    for part in parent_parts:
+        current = current / part
+        if current.is_symlink():
+            raise PathSandboxError("Symlink components are not allowed for local transfers", requested=path, scope=str(root))
+    name = resolved.name.lower()
+    if any(part.lower() in _SENSITIVE_LOCAL_NAMES for part in parts_to_check) or name.endswith((".pem", ".key", ".p12")):
+        raise PathSandboxError("Local credential files are not allowed in transfers", requested=path, scope=str(root))
+    if for_write and resolved.exists() and resolved.is_symlink():
+        raise PathSandboxError("Download destination may not be a symlink", requested=path, scope=str(root))
+    return str(resolved)
 
 
 def check_canonical_parent(parent_real: str, basename: str, user_root: str) -> str:

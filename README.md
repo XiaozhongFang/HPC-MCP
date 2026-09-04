@@ -39,17 +39,20 @@ HPC 常使用共享账号（如 `/home/shared_account/`）。该 home 目录**�
 
 ```
 HPC_MCP_ROOT=/home/shared_account/fangxiaozhong
+export HPC_MCP_LOCAL_ROOT=$PWD       # 上传/下载允许访问的本地目录
 ```
 
-所有文件操作都被限制在该 root 之下（含符号链接 canonical 校验）。其他用户的目录（`/home/shared_account/other_user`）、系统目录（`/etc`、`/tmp`、`/opt`）一律拒绝。
+所有远程文件操作都被限制在该 root 之下（含符号链接 canonical 校验）。本地 `upload`/`download` 同样被限制在 `local_root`，拒绝 `.ssh`、私钥和符号链接路径；默认值是启动进程的当前目录。其他用户的目录（`/home/shared_account/other_user`）、系统目录（`/etc`、`/tmp`、`/opt`）一律拒绝。
 
 ### Login Node 策略
 
-登录节点只允许轻量、只读的管理/查询命令（白名单制）：`ls`、`find`、`cat`、`grep`、`head`、`tail`、`git status/diff/log`、`module list/avail`、`squeue`、`sacct`、`scontrol show` 等。
+登录节点只允许轻量、只读的管理命令（白名单制）：`ls`、`find`、`cat`、`grep`、`head`、`tail`、`git status/diff/log`、`module list/avail` 等。为防止共享账号下查看其他使用者的作业，`squeue`、`sacct`、`scontrol` 不再通过 `hpc.shell.run_safe` 暴露，只能使用带归属检查的 Slurm 工具。
 
 **永远拒绝**在登录节点执行计算与编译：`julia`、`python`、`make`、`cmake --build`、`ninja`、`mpirun`、`srun`、`pytest`、`matlab`、GPU 程序等——全部引导至 `hpc.slurm.submit`。
 
 命令策略在**代码层面**拒绝：shell 元字符（`;`、`&&`、`||`、`|`、`>`、`<`、`$()`、反引号、`&`）、路径形式的任意可执行文件（`./program`）、`find -exec`、`git -c`、嵌套 shell、`sudo`/`ssh`/`curl` 等危险程序。解析失败同样拒绝（fail-closed）。
+
+`env`/`printenv` 即使被请求，也只在清空后的最小环境中运行；不会返回 SSH token、密钥或集群凭证。所有命令的路径操作数会再次执行远程 `realpath` 校验，并拒绝跟随符号链接的选项。
 
 ### Slurm 资源策略
 
@@ -73,6 +76,7 @@ HPC_MCP_ROOT=/home/shared_account/fangxiaozhong
 
 ```bash
 # pip
+python3 -m pip install --user -U pip
 pip install .
 
 # pipx
@@ -94,7 +98,8 @@ python -m hpc_mcp --help
 ### CLI
 
 ```bash
-hpc-mcp --host my-hpc --user shared_account --root /home/shared_account/fangxiaozhong
+hpc-mcp --host my-hpc --user shared_account \
+  --root /home/shared_account/fangxiaozhong --local-root "$PWD"
 ```
 
 ### 环境变量
@@ -103,6 +108,7 @@ hpc-mcp --host my-hpc --user shared_account --root /home/shared_account/fangxiao
 export HPC_MCP_HOST=my-hpc
 export HPC_MCP_USER=shared_account
 export HPC_MCP_ROOT=/home/shared_account/fangxiaozhong
+export HPC_MCP_LOCAL_ROOT=$PWD
 export HPC_MCP_ALLOWED_PARTITIONS=compute,debug
 export HPC_MCP_MAX_CPUS=64
 export HPC_MCP_MAX_TIME=24:00:00
@@ -116,6 +122,7 @@ export HPC_MCP_MAX_TIME=24:00:00
 host: my-hpc
 user: shared_account
 root: /home/shared_account/fangxiaozhong
+local_root: /path/to/local/project
 
 slurm:
   allowed_partitions: [compute]
@@ -240,6 +247,8 @@ python -m pytest tests/ -q
 ```
 
 覆盖：路径穿越、符号链接逃逸、命令注入、login/compute 边界、Slurm 资源滥用、作业隔离。
+
+完整的发现、修复和残余风险记录见 [`docs/SECURITY_REVIEW.md`](docs/SECURITY_REVIEW.md)，模块边界和请求流程见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 
 ## 限制（v1 明确不做）
 

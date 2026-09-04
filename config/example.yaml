@@ -4,6 +4,7 @@
 host: my-hpc                 # 推荐对应 ~/.ssh/config 中的 Host 别名
 user: shared_account
 root: /home/shared_account/fangxiaozhong   # 必须：Agent 被限制在此目录内
+local_root: .                              # 本地上传/下载目录（默认当前工作目录）
 
 # identity_file: ~/.ssh/id_ed25519
 

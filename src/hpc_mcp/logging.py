@@ -22,6 +22,8 @@ _SENSITIVE_PATTERNS = [
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL),
     re.compile(r"(?i)(password|passwd|token|secret|api[_-]?key)\s*[:=]\s*\S+"),
 ]
+_SENSITIVE_KEYS = re.compile(r"(?i)(password|passwd|token|secret|api[_-]?key|private[_-]?key|credential)")
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
 _configured = False
 
@@ -60,7 +62,24 @@ def get_logger() -> logging.Logger:
 
 def sanitize(value: Any, *, max_len: int = 300) -> str:
     """Render a value for logging, redacting secrets and truncating."""
-    text = repr(value)
+    def redact(item: Any, depth: int = 0) -> Any:
+        if depth > 8:
+            return "[REDACTED:depth]"
+        if isinstance(item, dict):
+            return {
+                str(key): "[REDACTED]" if _SENSITIVE_KEYS.search(str(key)) else redact(val, depth + 1)
+                for key, val in item.items()
+            }
+        if isinstance(item, (list, tuple, set)):
+            return [redact(val, depth + 1) for val in item]
+        if isinstance(item, str):
+            text = _CONTROL_CHARS.sub(lambda m: f"\\x{ord(m.group(0)):02x}", item)
+            for pat in _SENSITIVE_PATTERNS:
+                text = pat.sub("[REDACTED]", text)
+            return text
+        return item
+
+    text = repr(redact(value))
     for pat in _SENSITIVE_PATTERNS:
         text = pat.sub("[REDACTED]", text)
     if len(text) > max_len:

@@ -17,7 +17,7 @@ import base64
 import posixpath
 
 from ..config import Config
-from ..errors import PathSandboxError, RemoteCommandError
+from ..errors import PathSandboxError
 from ..security import limits
 from ..security.path_policy import check_canonical_parent, validate_path
 from ..ssh.manager import SshManager
@@ -33,7 +33,7 @@ class FileService:
 
     # -- canonicalization ----------------------------------------------------
 
-    async def _resolve_existing(self, path: str) -> str:
+    async def resolve_existing(self, path: str) -> str:
         """Validate + canonicalize an existing remote path."""
         lexical = validate_path(path, self._root)
         real = await self._ssh.realpath(lexical)
@@ -45,7 +45,7 @@ class FileService:
             )
         return validate_path(real, self._root)
 
-    async def _resolve_for_create(self, path: str) -> str:
+    async def resolve_for_create(self, path: str) -> str:
         """Validate + canonicalize the parent of a to-be-created path."""
         lexical = validate_path(path, self._root)
         parent, _, basename = lexical.rpartition("/")
@@ -57,13 +57,33 @@ class FileService:
                 requested=path,
                 scope=self._root,
             )
-        return check_canonical_parent(real_parent, basename, self._root)
+        candidate = check_canonical_parent(real_parent, basename, self._root)
+        # realpath -m returns the lexical path for a new target.  A different
+        # result therefore indicates that the final component already exists
+        # as a symlink; refusing it prevents redirection/SFTP from following a
+        # target outside the sandbox.
+        target_real = await self._ssh.realpath(lexical)
+        if target_real is not None and target_real != lexical:
+            try:
+                validate_path(target_real, self._root)
+            except PathSandboxError:
+                raise
+            raise PathSandboxError(
+                "The destination is a symlink; writes and uploads require a regular path",
+                requested=path,
+                scope=self._root,
+            )
+        return candidate
+
+    # Compatibility aliases for internal callers from older integrations.
+    _resolve_existing = resolve_existing
+    _resolve_for_create = resolve_for_create
 
     # -- operations ------------------------------------------------------------
 
     async def list_dir(self, path: str, *, recursive: bool = False, max_entries: int | None = None) -> list[dict]:
-        real = await self._resolve_existing(path)
-        cap = min(max_entries or self._cfg.files.max_list_entries, self._cfg.files.max_list_entries)
+        real = await self.resolve_existing(path)
+        cap = self._bounded_cap(max_entries, self._cfg.files.max_list_entries, "max_entries")
         if recursive:
             argv = ["find", real, "-mindepth", "1", "-maxdepth", "8", "-printf", "%y %s %p\n"]
         else:
@@ -89,8 +109,10 @@ class FileService:
         return entries
 
     async def read_file(self, path: str, *, max_bytes: int | None = None, offset: int = 0) -> dict:
-        real = await self._resolve_existing(path)
-        cap = min(max_bytes or self._cfg.files.max_read_bytes, self._cfg.files.max_read_bytes)
+        real = await self.resolve_existing(path)
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise PathSandboxError("offset must be a non-negative integer", requested=str(offset))
+        cap = self._bounded_cap(max_bytes, self._cfg.files.max_read_bytes, "max_bytes")
 
         # size check first
         st = await self._ssh.run(["stat", "-c", "%s", "--", real], check=True)
@@ -104,8 +126,8 @@ class FileService:
         # TOCTOU window on shared accounts.
         argv = [
             "sh", "-c",
-            f"test ! -L {_q(real)} && dd if={_q(real)} bs=1 skip={int(offset)} "
-            f"count={fetch} status=none | base64 -w0",
+            f"if test -L {_q(real)}; then exit 1; fi; "
+            f"dd if={_q(real)} bs=1 skip={offset} count={fetch} status=none | base64 -w0",
         ]
         res = await self._ssh.run(argv, check=True, max_output=int(cap * 1.4) + 4096)
         data = base64.b64decode(res.stdout.strip() or b"")
@@ -122,7 +144,7 @@ class FileService:
         }
 
     async def write_file(self, path: str, content: str | bytes, *, append: bool = False) -> dict:
-        real = await self._resolve_for_create(path)
+        real = await self.resolve_for_create(path)
         data = content.encode() if isinstance(content, str) else content
         limits.check_write_size(len(data), self._cfg.files.max_write_bytes)
 
@@ -152,16 +174,16 @@ class FileService:
         if parents:
             lexical = validate_path(path, self._root)
             # verify nearest existing ancestor is inside root
-            real = await self._resolve_for_create(lexical + "/.mkdir-marker")
+            real = await self.resolve_for_create(lexical + "/.mkdir-marker")
             target = posixpath.dirname(real)
             await self._ssh.run(["mkdir", "-p", "--", target], check=True)
             return {"path": target, "created": True}
-        real = await self._resolve_for_create(path)
+        real = await self.resolve_for_create(path)
         await self._ssh.run(["mkdir", "--", real], check=True)
         return {"path": real, "created": True}
 
     async def delete(self, path: str, *, recursive: bool = False) -> dict:
-        real = await self._resolve_existing(path)
+        real = await self.resolve_existing(path)
         if real == self._root:
             raise PathSandboxError(
                 "Deleting the configured user root itself is not allowed",
@@ -175,13 +197,13 @@ class FileService:
         return {"path": real, "deleted": True}
 
     async def rename(self, src: str, dst: str) -> dict:
-        real_src = await self._resolve_existing(src)
-        real_dst = await self._resolve_for_create(dst)
+        real_src = await self.resolve_existing(src)
+        real_dst = await self.resolve_for_create(dst)
         await self._ssh.run(["mv", "-n", "--", real_src, real_dst], check=True)
         return {"src": real_src, "dst": real_dst}
 
     async def stat(self, path: str) -> dict:
-        real = await self._resolve_existing(path)
+        real = await self.resolve_existing(path)
         res = await self._ssh.run(
             ["stat", "-c", "%F|%s|%a|%U|%G|%Y", "--", real], check=True
         )
@@ -195,6 +217,14 @@ class FileService:
             "group": group,
             "mtime_epoch": int(mtime),
         }
+
+    @staticmethod
+    def _bounded_cap(value: int | None, maximum: int, name: str) -> int:
+        if value is None:
+            return maximum
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise PathSandboxError(f"{name} must be a non-negative integer", requested=str(value))
+        return min(value, maximum)
 
 
 def _q(s: str) -> str:

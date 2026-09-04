@@ -92,25 +92,26 @@ class SshManager:
 
     async def close(self) -> None:
         """Shut down the shared control connection, if any."""
-        if self._control_path:
-            argv = self._base_argv()[:1] + [
-                "-O", "exit", "-o", f"ControlPath={self._control_path}",
-            ]
-            destination = self._cfg.ssh.host or ""
-            if self._cfg.ssh.user:
-                destination = f"{self._cfg.ssh.user}@{self._cfg.ssh.host}"
-            argv += ["--", destination]
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    *argv, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
-                )
-                await asyncio.wait_for(proc.wait(), timeout=5)
-            except (OSError, asyncio.TimeoutError):
-                pass
-        if self._control_dir:
-            self._control_dir.cleanup()
-            self._control_dir = None
-            self._control_path = None
+        async with self._lock:
+            if self._control_path:
+                argv = self._base_argv()[:1] + [
+                    "-O", "exit", "-o", f"ControlPath={self._control_path}",
+                ]
+                destination = self._cfg.ssh.host or ""
+                if self._cfg.ssh.user:
+                    destination = f"{self._cfg.ssh.user}@{self._cfg.ssh.host}"
+                argv += ["--", destination]
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        *argv, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+                    )
+                    await asyncio.wait_for(proc.wait(), timeout=5)
+                except (OSError, asyncio.TimeoutError):
+                    pass
+            if self._control_dir:
+                self._control_dir.cleanup()
+                self._control_dir = None
+                self._control_path = None
 
     # -- command execution ---------------------------------------------------
 
@@ -129,6 +130,8 @@ class SshManager:
         """
         if not argv:
             raise SshError("Empty remote argv")
+        if any("\x00" in str(a) or "\n" in str(a) or "\r" in str(a) for a in argv):
+            raise SshError("Remote argv contains forbidden control characters")
         remote_cmd = shlex.join([str(a) for a in argv])
         return await self.run_raw(remote_cmd, timeout=timeout, max_output=max_output, check=check)
 
@@ -146,8 +149,21 @@ class SshManager:
         Only trusted internal callers may use this; the string must have
         been built with shlex quoting on every untrusted component.
         """
-        timeout = timeout or self._cfg.ssh.command_timeout
-        full_argv = self._base_argv() + [remote_cmd]
+        if not isinstance(remote_cmd, str) or not remote_cmd or "\x00" in remote_cmd:
+            raise SshError("Remote command is empty or contains NUL")
+        if len(remote_cmd) > 1024 * 1024:
+            raise SshError("Remote command exceeds the transport size limit")
+        timeout = self._cfg.ssh.command_timeout if timeout is None else timeout
+        if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+            raise SshError("Remote command timeout must be a positive integer")
+        if isinstance(max_output, bool) or not isinstance(max_output, int) or max_output < 0:
+            raise SshError("Remote output limit must be a non-negative integer")
+        if max_output > 64 * 1024 * 1024:
+            raise SshError("Remote output limit exceeds the transport hard ceiling")
+        if stdin_text is not None and (not isinstance(stdin_text, str) or len(stdin_text.encode()) > 8 * 1024 * 1024):
+            raise SshError("Remote stdin exceeds the transport size limit")
+        async with self._lock:
+            full_argv = self._base_argv() + [remote_cmd]
         self._log.debug("ssh exec: %s", remote_cmd)
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -160,23 +176,58 @@ class SshManager:
         except OSError as exc:
             raise SshError(f"Failed to launch ssh: {exc}") from exc
 
+        async def collect(stream: asyncio.StreamReader | None) -> bytes:
+            if stream is None:
+                return b""
+            chunks: list[bytes] = []
+            total = 0
+            truncated = False
+            while True:
+                chunk = await stream.read(64 * 1024)
+                if not chunk:
+                    break
+                if total < max_output:
+                    take = min(len(chunk), max_output - total)
+                    chunks.append(chunk[:take])
+                    total += take
+                    if take < len(chunk):
+                        truncated = True
+                else:
+                    truncated = True
+            data = b"".join(chunks)
+            if truncated and max_output:
+                marker = b"\n...[output truncated]"
+                return (data + marker)[:max_output]
+            return data[:max_output]
+
+        stdout_task = asyncio.create_task(collect(proc.stdout))
+        stderr_task = asyncio.create_task(collect(proc.stderr))
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(stdin_text.encode() if stdin_text is not None else None),
-                timeout=timeout,
-            )
+            if stdin_text is not None and proc.stdin is not None:
+                proc.stdin.write(stdin_text.encode())
+                await proc.stdin.drain()
+                proc.stdin.close()
+        except (BrokenPipeError, ConnectionError) as exc:
+            proc.kill()
+            await proc.wait()
+            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+            raise SshError("SSH process closed its input unexpectedly") from exc
+        try:
+            await asyncio.wait_for(asyncio.gather(stdout_task, stderr_task, proc.wait()), timeout=timeout)
         except asyncio.TimeoutError as exc:
             proc.kill()
             try:
                 await proc.wait()
             except Exception:  # noqa: BLE001 - best effort kill
                 pass
+            for task in (stdout_task, stderr_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
             raise SshError(f"Remote command timed out after {timeout}s: {remote_cmd[:200]}") from exc
 
-        if len(stdout) > max_output:
-            stdout = stdout[:max_output] + b"\n...[output truncated]"
-        if len(stderr) > max_output:
-            stderr = stderr[:max_output] + b"\n...[output truncated]"
+        stdout = stdout_task.result()
+        stderr = stderr_task.result()
 
         result = RemoteResult(stdout=stdout, stderr=stderr, exit_code=proc.returncode or 0)
 
@@ -223,7 +274,3 @@ class SshManager:
             return None
         out = res.stdout_text.strip()
         return out or None
-
-    async def stat_exists(self, path: str) -> bool:
-        res = await self.run(["test", "-e", path], check=False)
-        return res.exit_code == 0

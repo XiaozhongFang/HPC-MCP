@@ -20,6 +20,14 @@ def _base_env(monkeypatch):
 
 
 class TestBuildConfig:
+    def test_explicit_environment_mapping_is_used(self):
+        cfg = build_config(
+            NS(),
+            environ={"HPC_MCP_HOST": "mapped-host", "HPC_MCP_ROOT": "/home/u/mapped"},
+        )
+        assert cfg.ssh.host == "mapped-host"
+        assert cfg.root == "/home/u/mapped"
+
     def test_cli_minimal(self, monkeypatch):
         _base_env(monkeypatch)
         cfg = build_config(NS(host="h", root="/home/u/me"))
@@ -96,3 +104,15 @@ class TestBuildConfig:
         cfg = build_config(NS(host="h", root="/home/u/me/"))
         assert cfg.root == "/home/u/me"
         assert cfg.jobs_dir == "/home/u/me/.hpc-mcp/jobs"
+
+    def test_bad_nested_section_is_config_error(self, monkeypatch, tmp_path):
+        _base_env(monkeypatch)
+        p = tmp_path / "c.yaml"
+        p.write_text("host: h\nroot: /home/u/me\nslurm: []\n")
+        with pytest.raises(ConfigError, match="slurm"):
+            build_config(NS(config=str(p)))
+
+    def test_root_filesystem_denied(self, monkeypatch):
+        _base_env(monkeypatch)
+        with pytest.raises(ConfigError, match="filesystem root"):
+            build_config(NS(host="h", root="/"))

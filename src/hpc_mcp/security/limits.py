@@ -21,7 +21,3 @@ def check_write_size(nbytes: int, max_bytes: int) -> None:
             f"Write of {nbytes} bytes exceeds the write limit of {max_bytes} bytes",
             scope=f"max write: {max_bytes} bytes",
         )
-
-
-def clamp(value: int, lo: int, hi: int) -> int:
-    return max(lo, min(hi, value))
