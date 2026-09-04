@@ -12,7 +12,8 @@ description: 在远程 HPC 集群上安全地进行科研计算开发（Julia/MO
 1. **登录节点不做计算**。`julia`、`python`、`make`、`cmake --build`、`mpirun`、`pytest`、大型测试——一律走 `hpc.slurm.submit`。
 2. **只碰 `$HPC_MCP_ROOT` 内的路径**。`../`、符号链接出界、其他用户目录都会被拒。用 `hpc.info` 查看 root。
 3. **不要自己构造 SSH/SCP 命令**；用 `hpc.files.*` 工具传输和读写。
-4. `hpc.shell.run_safe` 仅限轻量查询（`ls`、`cat`、`git status/diff/log`、`module list`、`squeue` 等），不支持管道/重定向/命令串联。
+4. `hpc.shell.run_safe` 仅限轻量查询（`ls`、`cat`、`git status/diff/log`、`module list` 等），不支持管道/重定向/命令串联；`squeue`/`sacct`/`scontrol` 必须通过带归属检查的 Slurm 工具查询。
+5. 文件传输只能使用配置的 `local_root` 与远程 `HPC_MCP_ROOT`；不要上传 `.ssh`、私钥或符号链接。
 
 ## 标准工作流
 

@@ -13,10 +13,7 @@ import re
 from ..config import SlurmConfig
 from ..errors import SlurmPolicyError
 
-_TIME_RE = re.compile(
-    r"^(?:(?P<days>\d+)-)?(?:(?P<hours>\d{1,2}):)?(?P<minutes>\d{1,2}):(?P<seconds>\d{2})$"
-    r"|^(?P<mins_only>\d+)$"
-)
+_TIME_RE = re.compile(r"^(?:(?P<days>\d+)-)?(?P<body>\d+(?::\d+){1,2})$|^(?P<mins_only>\d+)$")
 
 
 def parse_time_limit(value: str) -> int:
@@ -38,9 +35,19 @@ def parse_time_limit(value: str) -> int:
     if m.group("mins_only") is not None:
         return int(m.group("mins_only")) * 60
     days = int(m.group("days") or 0)
-    hours = int(m.group("hours") or 0)
-    minutes = int(m.group("minutes") or 0)
-    seconds = int(m.group("seconds") or 0)
+    fields = [int(part) for part in m.group("body").split(":")]
+    if days and len(fields) == 2:
+        hours, minutes = fields
+        seconds = 0
+    elif len(fields) == 2:
+        hours = 0
+        minutes, seconds = fields
+    elif len(fields) == 3:
+        hours, minutes, seconds = fields
+    else:  # defensive: regex already restricts this
+        raise SlurmPolicyError("Could not parse Slurm time limit", requested=v)
+    if minutes > 59 or seconds > 59 or hours > 24 or (hours == 24 and (minutes or seconds or days)):
+        raise SlurmPolicyError("Time limit has invalid hour/minute/second fields", requested=v)
     return days * 86400 + hours * 3600 + minutes * 60 + seconds
 
 
@@ -56,6 +63,8 @@ def format_time_limit(seconds: int) -> str:
 def parse_memory_mb(value: str | int) -> int:
     """Parse a memory spec into MiB.  Accepts int MiB, or strings like
     ``8000``, ``8000M``, ``64G``, ``2T`` (Slurm suffixes)."""
+    if isinstance(value, bool):
+        raise SlurmPolicyError("Memory must be a positive integer or Slurm size string", requested=repr(value))
     if isinstance(value, int):
         if value <= 0:
             raise SlurmPolicyError("Memory must be positive", requested=repr(value))
@@ -88,6 +97,15 @@ def validate_job_request(
     """Validate a submit request against policy.  Returns the effective,
     clamped-or-defaulted parameters on success; raises on violation.
     """
+    if not isinstance(cfg.max_concurrent_jobs, int) or cfg.max_concurrent_jobs < 1:
+        raise SlurmPolicyError("Invalid server max_concurrent_jobs configuration")
+    for name in ("max_nodes", "max_cpus", "max_memory_mb", "max_gpus"):
+        value = getattr(cfg, name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < (0 if name == "max_gpus" else 1):
+            raise SlurmPolicyError(f"Invalid server {name} configuration")
+    if not isinstance(active_jobs, int) or active_jobs < 0:
+        raise SlurmPolicyError("active_jobs must be a non-negative integer", requested=repr(active_jobs))
+
     # Partition -------------------------------------------------------------
     if not cfg.allowed_partitions:
         raise SlurmPolicyError(
@@ -100,6 +118,8 @@ def validate_job_request(
             "A partition must be specified",
             scope="allowed partitions: " + ", ".join(cfg.allowed_partitions),
         )
+    if not isinstance(effective_partition, str) or not effective_partition or len(effective_partition) > 128 or any(ch in effective_partition for ch in "\x00\r\n"):
+        raise SlurmPolicyError("Partition must be a simple name", requested=repr(effective_partition))
     if effective_partition not in cfg.allowed_partitions:
         raise SlurmPolicyError(
             f"Partition {effective_partition!r} is not allowed",

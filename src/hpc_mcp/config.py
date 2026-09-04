@@ -12,6 +12,8 @@ resource limits unless the user explicitly configures more.
 from __future__ import annotations
 
 import os
+import posixpath
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -123,6 +125,8 @@ class Config:
     wait_max_seconds: int = DEFAULT_WAIT_MAX_SECONDS
     log_file: str | None = None
     log_level: str = "INFO"
+    # Local directory that transfer tools may read/write.
+    local_root: str = field(default_factory=lambda: str(Path.cwd().resolve()))
 
     @property
     def jobs_dir(self) -> str:
@@ -134,29 +138,20 @@ class Config:
 # Loading helpers
 # ---------------------------------------------------------------------------
 
-def _deep_get(d: dict[str, Any], *keys: str) -> Any:
-    cur: Any = d
-    for k in keys:
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(k)
-    return cur
-
-
-def _env(name: str) -> str | None:
-    v = os.environ.get(ENV_PREFIX + name)
+def _env(name: str, environ: dict[str, str] | None = None) -> str | None:
+    v = (os.environ if environ is None else environ).get(ENV_PREFIX + name)
     return v if v is not None and v != "" else None
 
 
-def _env_list(name: str) -> list[str] | None:
-    v = _env(name)
+def _env_list(name: str, environ: dict[str, str] | None = None) -> list[str] | None:
+    v = _env(name, environ)
     if v is None:
         return None
     return [p.strip() for p in v.split(",") if p.strip()]
 
 
-def _env_int(name: str) -> int | None:
-    v = _env(name)
+def _env_int(name: str, environ: dict[str, str] | None = None) -> int | None:
+    v = _env(name, environ)
     if v is None:
         return None
     try:
@@ -170,6 +165,30 @@ def _coalesce(*values: Any, default: Any = None) -> Any:
         if v is not None:
             return v
     return default
+
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _mapping(data: dict[str, Any], name: str) -> dict[str, Any]:
+    value = data.get(name)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError(f"Config section {name!r} must be a mapping")
+    return value
+
+
+def _bounded_int(value: Any, name: str, *, minimum: int = 1, maximum: int = 2**31 - 1) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not (minimum <= value <= maximum):
+        raise ConfigError(f"{name} must be an integer between {minimum} and {maximum}, got {value!r}")
+    return value
+
+
+def _safe_text(value: Any, name: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > 4096 or _CONTROL_CHARS.search(value):
+        raise ConfigError(f"{name} must be a non-empty string without control characters")
+    return value
 
 
 def load_config_file(path: str | None) -> dict[str, Any]:
@@ -196,12 +215,13 @@ def build_config(cli_args: Any | None = None, environ: dict[str, str] | None = N
     ``cli_args`` is expected to be an ``argparse.Namespace``-like object
     produced by :mod:`hpc_mcp.__main__` (or ``None`` in tests).
     """
+    env = os.environ if environ is None else environ
     cli = vars(cli_args) if cli_args is not None else {}
     cli = {k: v for k, v in cli.items() if v is not None}
 
     file_data = load_config_file(cli.get("config"))
 
-    root = _coalesce(cli.get("root"), _env("ROOT"), file_data.get("root"))
+    root = _coalesce(cli.get("root"), _env("ROOT", env), file_data.get("root"))
     if root is None:
         raise ConfigError(
             "No HPC user root configured.\n\n"
@@ -210,41 +230,43 @@ def build_config(cli_args: Any | None = None, environ: dict[str, str] | None = N
             f"  {ENV_PREFIX}ROOT=/home/<account>/<you>\n"
             "  config file: root: /home/<account>/<you>"
         )
-    if not root.startswith("/"):
+    if not isinstance(root, str) or _CONTROL_CHARS.search(root) or not root.startswith("/"):
         raise ConfigError(f"Root must be an absolute remote path, got {root!r}")
-    if root != "/" and root.endswith("/"):
-        root = root.rstrip("/")
+    root = posixpath.normpath(root)
+    if root == "/":
+        raise ConfigError("Root must be a dedicated user directory, not filesystem root '/'")
 
     # -- SSH ---------------------------------------------------------------
-    ssh_file = file_data.get("ssh") or {}
+    ssh_file = _mapping(file_data, "ssh")
     identity = _coalesce(
         cli.get("identity_file"),
-        _env("IDENTITY_FILE"),
+        _env("IDENTITY_FILE", env),
         ssh_file.get("identity_file"),
         file_data.get("identity_file"),
     )
     if identity:
+        _safe_text(identity, "SSH identity_file")
         identity = str(Path(identity).expanduser())
     ssh = SshConfig(
-        host=_coalesce(cli.get("host"), _env("HOST"), ssh_file.get("host"), file_data.get("host")),
-        port=_coalesce(cli.get("port"), _env_int("PORT"), ssh_file.get("port"), default=22),
-        user=_coalesce(cli.get("user"), _env("USER"), ssh_file.get("user"), file_data.get("user")),
+        host=_coalesce(cli.get("host"), _env("HOST", env), ssh_file.get("host"), file_data.get("host")),
+        port=_coalesce(cli.get("port"), _env_int("PORT", env), ssh_file.get("port"), default=22),
+        user=_coalesce(cli.get("user"), _env("USER", env), ssh_file.get("user"), file_data.get("user")),
         identity_file=identity,
         connect_timeout=_coalesce(
-            _env_int("CONNECT_TIMEOUT"), ssh_file.get("connect_timeout"), default=DEFAULT_CONNECT_TIMEOUT
+            _env_int("CONNECT_TIMEOUT", env), ssh_file.get("connect_timeout"), default=DEFAULT_CONNECT_TIMEOUT
         ),
         command_timeout=_coalesce(
-            _env_int("COMMAND_TIMEOUT"), ssh_file.get("command_timeout"), default=DEFAULT_COMMAND_TIMEOUT
+            _env_int("COMMAND_TIMEOUT", env), ssh_file.get("command_timeout"), default=DEFAULT_COMMAND_TIMEOUT
         ),
         strict_host_key_checking=_coalesce(
-            _env("STRICT_HOST_KEY_CHECKING"),
+            _env("STRICT_HOST_KEY_CHECKING", env),
             ssh_file.get("strict_host_key_checking"),
             default="yes",
         ),
     )
-    if ssh.strict_host_key_checking not in ("yes", "accept-new", "no"):
+    if ssh.strict_host_key_checking not in ("yes", "accept-new"):
         raise ConfigError(
-            "ssh.strict_host_key_checking must be 'yes', 'accept-new' or 'no', "
+            "ssh.strict_host_key_checking must be 'yes' or 'accept-new', "
             f"got {ssh.strict_host_key_checking!r}"
         )
     if ssh.host is None:
@@ -253,72 +275,121 @@ def build_config(cli_args: Any | None = None, environ: dict[str, str] | None = N
             "Set it via --host, " + ENV_PREFIX + "HOST, or 'host' in the config file.\n"
             "A Host alias from ~/.ssh/config is recommended."
         )
-    if not isinstance(ssh.port, int) or not (1 <= ssh.port <= 65535):
+    if ssh.host is not None:
+        _safe_text(ssh.host, "SSH host")
+    if ssh.user is not None:
+        _safe_text(ssh.user, "SSH user")
+    if not isinstance(ssh.port, int) or isinstance(ssh.port, bool) or not (1 <= ssh.port <= 65535):
         raise ConfigError(f"Invalid SSH port: {ssh.port!r}")
+    ssh.connect_timeout = _bounded_int(ssh.connect_timeout, "ssh.connect_timeout", maximum=3600)
+    ssh.command_timeout = _bounded_int(ssh.command_timeout, "ssh.command_timeout", maximum=86400)
 
     # -- Slurm -------------------------------------------------------------
-    slurm_file = file_data.get("slurm") or {}
+    slurm_file = _mapping(file_data, "slurm")
     allowed_partitions = _coalesce(
-        _env_list("ALLOWED_PARTITIONS"),
+        _env_list("ALLOWED_PARTITIONS", env),
         slurm_file.get("allowed_partitions"),
         default=[],
     )
+    if not isinstance(allowed_partitions, list):
+        raise ConfigError("slurm.allowed_partitions must be a list of names")
     slurm = SlurmConfig(
         allowed_partitions=list(allowed_partitions),
-        max_nodes=_coalesce(_env_int("MAX_NODES"), slurm_file.get("max_nodes"), default=DEFAULT_SLURM_MAX_NODES),
-        max_cpus=_coalesce(_env_int("MAX_CPUS"), slurm_file.get("max_cpus"), default=DEFAULT_SLURM_MAX_CPUS),
+        max_nodes=_coalesce(_env_int("MAX_NODES", env), slurm_file.get("max_nodes"), default=DEFAULT_SLURM_MAX_NODES),
+        max_cpus=_coalesce(_env_int("MAX_CPUS", env), slurm_file.get("max_cpus"), default=DEFAULT_SLURM_MAX_CPUS),
         max_memory_mb=_coalesce(
-            _env_int("MAX_MEMORY_MB"), slurm_file.get("max_memory_mb"), default=DEFAULT_SLURM_MAX_MEMORY_MB
+            _env_int("MAX_MEMORY_MB", env), slurm_file.get("max_memory_mb"), default=DEFAULT_SLURM_MAX_MEMORY_MB
         ),
-        max_gpus=_coalesce(_env_int("MAX_GPUS"), slurm_file.get("max_gpus"), default=DEFAULT_SLURM_MAX_GPUS),
-        max_time=_coalesce(_env("MAX_TIME"), slurm_file.get("max_time"), default=DEFAULT_SLURM_MAX_TIME),
+        max_gpus=_coalesce(_env_int("MAX_GPUS", env), slurm_file.get("max_gpus"), default=DEFAULT_SLURM_MAX_GPUS),
+        max_time=_coalesce(_env("MAX_TIME", env), slurm_file.get("max_time"), default=DEFAULT_SLURM_MAX_TIME),
         max_concurrent_jobs=_coalesce(
-            _env_int("MAX_CONCURRENT_JOBS"),
+            _env_int("MAX_CONCURRENT_JOBS", env),
             slurm_file.get("max_concurrent_jobs"),
             default=DEFAULT_MAX_CONCURRENT_JOBS,
         ),
     )
+    if any(not isinstance(p, str) or not p or _CONTROL_CHARS.search(p) or "/" in p for p in slurm.allowed_partitions):
+        raise ConfigError("slurm.allowed_partitions contains an invalid partition name")
+    slurm.max_nodes = _bounded_int(slurm.max_nodes, "slurm.max_nodes")
+    slurm.max_cpus = _bounded_int(slurm.max_cpus, "slurm.max_cpus")
+    slurm.max_memory_mb = _bounded_int(slurm.max_memory_mb, "slurm.max_memory_mb")
+    slurm.max_gpus = _bounded_int(slurm.max_gpus, "slurm.max_gpus", minimum=0)
+    slurm.max_concurrent_jobs = _bounded_int(slurm.max_concurrent_jobs, "slurm.max_concurrent_jobs")
+    from .security.slurm_policy import parse_time_limit
+    if not isinstance(slurm.max_time, str):
+        raise ConfigError("slurm.max_time must be a string")
+    try:
+        if parse_time_limit(slurm.max_time) <= 0:
+            raise ConfigError("slurm.max_time must be positive")
+    except ConfigError:
+        raise
+    except Exception as exc:
+        raise ConfigError(f"Invalid slurm.max_time: {slurm.max_time!r}") from exc
 
     # -- Shell -------------------------------------------------------------
-    shell_file = file_data.get("shell") or {}
+    shell_file = _mapping(file_data, "shell")
     extra_safe = shell_file.get("safe_commands") or []
     if not isinstance(extra_safe, list):
         raise ConfigError("shell.safe_commands must be a list")
-    env_safe = _env_list("SAFE_COMMANDS") or []
+    env_safe = _env_list("SAFE_COMMANDS", env) or []
+    if any(not isinstance(c, str) or not c or len(c) > 128 or _CONTROL_CHARS.search(c) or "/" in c for c in [*extra_safe, *env_safe]):
+        raise ConfigError("shell.safe_commands entries must be non-empty command basenames")
     safe = list(dict.fromkeys([*DEFAULT_SAFE_COMMANDS, *extra_safe, *env_safe]))
     shell_cfg = ShellConfig(
         safe_commands=safe,
         max_exec_seconds=_coalesce(
-            _env_int("SHELL_MAX_EXEC_SECONDS"), shell_file.get("max_exec_seconds"), default=DEFAULT_COMMAND_TIMEOUT
+            _env_int("SHELL_MAX_EXEC_SECONDS", env), shell_file.get("max_exec_seconds"), default=DEFAULT_COMMAND_TIMEOUT
         ),
         max_output_bytes=_coalesce(
-            _env_int("MAX_OUTPUT_BYTES"), shell_file.get("max_output_bytes"), default=DEFAULT_MAX_OUTPUT_BYTES
+            _env_int("MAX_OUTPUT_BYTES", env), shell_file.get("max_output_bytes"), default=DEFAULT_MAX_OUTPUT_BYTES
         ),
     )
 
     # -- Files -------------------------------------------------------------
-    files_file = file_data.get("files") or {}
+    files_file = _mapping(file_data, "files")
     files = FilesConfig(
-        max_read_bytes=_coalesce(
-            _env_int("MAX_READ_BYTES"), files_file.get("max_read_bytes"), default=DEFAULT_MAX_READ_BYTES
+        max_read_bytes=_bounded_int(
+            _coalesce(_env_int("MAX_READ_BYTES", env), files_file.get("max_read_bytes"), default=DEFAULT_MAX_READ_BYTES),
+            "files.max_read_bytes", maximum=2**31 - 1,
         ),
-        max_write_bytes=_coalesce(
-            _env_int("MAX_WRITE_BYTES"), files_file.get("max_write_bytes"), default=DEFAULT_MAX_WRITE_BYTES
+        max_write_bytes=_bounded_int(
+            _coalesce(_env_int("MAX_WRITE_BYTES", env), files_file.get("max_write_bytes"), default=DEFAULT_MAX_WRITE_BYTES),
+            "files.max_write_bytes", maximum=2**31 - 1,
         ),
-        max_list_entries=_coalesce(
-            _env_int("MAX_LIST_ENTRIES"), files_file.get("max_list_entries"), default=DEFAULT_MAX_LIST_ENTRIES
+        max_list_entries=_bounded_int(
+            _coalesce(_env_int("MAX_LIST_ENTRIES", env), files_file.get("max_list_entries"), default=DEFAULT_MAX_LIST_ENTRIES),
+            "files.max_list_entries", maximum=1_000_000,
         ),
     )
+    shell_cfg.max_exec_seconds = _bounded_int(shell_cfg.max_exec_seconds, "shell.max_exec_seconds", maximum=86400)
+    shell_cfg.max_output_bytes = _bounded_int(shell_cfg.max_output_bytes, "shell.max_output_bytes", maximum=2**31 - 1)
 
-    wait_max = _coalesce(_env_int("WAIT_MAX_SECONDS"), file_data.get("wait_max_seconds"), default=DEFAULT_WAIT_MAX_SECONDS)
+    wait_max = _coalesce(_env_int("WAIT_MAX_SECONDS", env), file_data.get("wait_max_seconds"), default=DEFAULT_WAIT_MAX_SECONDS)
+    wait_max = _bounded_int(wait_max, "wait_max_seconds", maximum=7 * 86400)
 
-    log_file = _coalesce(cli.get("log_file"), _env("LOG_FILE"), file_data.get("log_file"))
+    log_file = _coalesce(cli.get("log_file"), _env("LOG_FILE", env), file_data.get("log_file"))
     if log_file:
         log_file = str(Path(log_file).expanduser())
-    log_level = _coalesce(cli.get("log_level"), _env("LOG_LEVEL"), file_data.get("log_level"), default="INFO")
+    log_level = _coalesce(cli.get("log_level"), _env("LOG_LEVEL", env), file_data.get("log_level"), default="INFO")
+    if str(log_level).upper() not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+        raise ConfigError(f"Invalid log level: {log_level!r}")
+
+    local_root_value = _coalesce(cli.get("local_root"), _env("LOCAL_ROOT", env), file_data.get("local_root"))
+    if local_root_value is not None and not isinstance(local_root_value, str):
+        raise ConfigError("local_root must be a path string")
+    local_root_path = Path(local_root_value or Path.cwd()).expanduser()
+    try:
+        local_root = local_root_path.resolve(strict=True)
+    except OSError as exc:
+        raise ConfigError(f"Local root cannot be resolved: {local_root_path}") from exc
+    if not local_root.is_dir():
+        raise ConfigError(f"Local root must be a directory: {local_root}")
+    if local_root.name.lower() in {".ssh", ".gnupg"}:
+        raise ConfigError("local_root may not be a credential directory")
 
     return Config(
         root=root,
+        local_root=str(local_root),
         ssh=ssh,
         slurm=slurm,
         shell=shell_cfg,

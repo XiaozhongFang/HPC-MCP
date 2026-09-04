@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import shutil
-import tempfile
 from pathlib import Path
 
 from ..config import Config
@@ -49,6 +48,8 @@ class SftpClient:
         return argv
 
     async def _run_batch(self, commands: list[str], timeout: int) -> None:
+        if not isinstance(timeout, int) or timeout <= 0:
+            raise SshError("SFTP timeout must be a positive integer")
         batch = "\n".join(commands) + "\n"
         argv = self._base_argv()
         self._log.debug("sftp batch: %s", "; ".join(commands))
@@ -61,13 +62,43 @@ class SftpClient:
             )
         except OSError as exc:
             raise SshError(f"Failed to launch sftp: {exc}") from exc
+        async def collect(stream: asyncio.StreamReader | None) -> bytes:
+            if stream is None:
+                return b""
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = await stream.read(64 * 1024)
+                if not chunk:
+                    return b"".join(chunks)[:1024 * 1024]
+                if total < 1024 * 1024:
+                    take = min(len(chunk), 1024 * 1024 - total)
+                    chunks.append(chunk[:take])
+                    total += take
+        stdout_task = asyncio.create_task(collect(proc.stdout))
+        stderr_task = asyncio.create_task(collect(proc.stderr))
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(batch.encode()), timeout=timeout
-            )
+            if proc.stdin is not None:
+                proc.stdin.write(batch.encode())
+                await proc.stdin.drain()
+                proc.stdin.close()
+        except (BrokenPipeError, ConnectionError) as exc:
+            proc.kill()
+            await proc.wait()
+            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+            raise SshError("SFTP process closed its input unexpectedly") from exc
+        try:
+            await asyncio.wait_for(asyncio.gather(stdout_task, stderr_task, proc.wait()), timeout=timeout)
         except asyncio.TimeoutError as exc:
             proc.kill()
+            await proc.wait()
+            for task in (stdout_task, stderr_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
             raise SshError(f"SFTP transfer timed out after {timeout}s") from exc
+        stdout = stdout_task.result()
+        stderr = stderr_task.result()
         if proc.returncode not in (0, None):
             raise RemoteCommandError(
                 f"SFTP batch failed (exit {proc.returncode}): {stderr.decode(errors='replace')[:500]}",
@@ -84,17 +115,19 @@ class SftpClient:
             raise RemoteCommandError(
                 f"Local file is {size} bytes, exceeding the transfer ceiling of {_MAX_TRANSFER_BYTES}"
             )
-        timeout = timeout or max(120, size // (5 * 1024 * 1024) + 60)
+        timeout = max(120, size // (5 * 1024 * 1024) + 60) if timeout is None else timeout
         # sftp batch commands: quote remote path against batch-line parsing
         await self._run_batch([f'put "{_batch_escape(local_path)}" "{_batch_escape(remote_path)}"'], timeout)
         return size
 
     async def download(self, remote_path: str, local_path: str, *, timeout: int | None = None) -> int:
-        timeout = timeout or 600
+        timeout = 600 if timeout is None else timeout
         await self._run_batch([f'get "{_batch_escape(remote_path)}" "{_batch_escape(local_path)}"'], timeout)
         return Path(local_path).stat().st_size
 
 
 def _batch_escape(path: str) -> str:
     """Escape a path for an sftp batch line (inside double quotes)."""
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in path):
+        raise RemoteCommandError("SFTP paths may not contain control characters")
     return path.replace("\\", "\\\\").replace('"', '\\"')

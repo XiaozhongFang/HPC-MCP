@@ -28,6 +28,7 @@ class SlurmManager:
         self._cfg = cfg
         self._ssh = ssh
         self._tracker = tracker
+        self._submit_lock = asyncio.Lock()
 
     # -- submit ----------------------------------------------------------------
 
@@ -46,6 +47,40 @@ class SlurmManager:
         gpus: int = 0,
         environment: dict[str, str] | None = None,
     ) -> dict:
+        async with self._submit_lock:
+            return await self._submit_impl(
+                job_name=job_name,
+                working_directory=working_directory,
+                command=command,
+                partition=partition,
+                nodes=nodes,
+                ntasks=ntasks,
+                cpus_per_task=cpus_per_task,
+                memory=memory,
+                time_limit=time_limit,
+                gpus=gpus,
+                environment=environment,
+            )
+
+    async def _submit_impl(
+        self,
+        *,
+        job_name: str,
+        working_directory: str,
+        command: list[str] | str,
+        partition: str | None = None,
+        nodes: int = 1,
+        ntasks: int = 1,
+        cpus_per_task: int = 1,
+        memory: str | int | None = None,
+        time_limit: str | None = None,
+        gpus: int = 0,
+        environment: dict[str, str] | None = None,
+    ) -> dict:
+        cmd_argv = self._validate_command(command)
+        env_values = self._validate_environment(environment)
+        if not isinstance(job_name, str) or not job_name or len(job_name) > 256 or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in job_name):
+            raise SlurmPolicyError("job_name must be 1-256 characters without control characters")
         # working_directory must be inside the sandbox (realpath-verified)
         from ..filesystem.service import FileService
 
@@ -73,20 +108,6 @@ class SlurmManager:
             active_jobs=active,
         )
 
-        if isinstance(command, str):
-            cmd_argv = [command]
-        else:
-            cmd_argv = [str(c) for c in command]
-        if not cmd_argv or any("\n" in c or "\x00" in c for c in cmd_argv):
-            raise SlurmPolicyError("command must be a non-empty argv without control characters")
-
-        if environment:
-            for k, v in environment.items():
-                if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", str(k)):
-                    raise SlurmPolicyError(f"Invalid environment variable name: {k!r}")
-                if any(ch in str(v) for ch in ("\n", "\x00")):
-                    raise SlurmPolicyError("Environment values may not contain control characters")
-
         safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", job_name or "job")[:64]
 
         script = self._render_script(
@@ -94,7 +115,7 @@ class SlurmManager:
             cwd=real_cwd,
             cmd_argv=cmd_argv,
             eff=eff,
-            environment=environment or {},
+            environment=env_values,
         )
 
         res = await self._submit_via_stdin(script)
@@ -120,11 +141,17 @@ class SlurmManager:
                     f"sbatch returned job id {job_id} but Slurm does not know it; refusing to track it"
                 )
 
-        job_dir = f"{self._cfg.jobs_dir}/{job_id}"
-        await self._ssh.run(["mkdir", "-p", "--", job_dir], check=True)
-        await self._tracker.register(
-            job_id, job_name=safe_name, project_root=real_cwd, job_dir=job_dir
-        )
+        try:
+            job_dir = await self._tracker.ensure_job_dir(job_id)
+            await self._tracker.prepare_output_links(job_id)
+            await self._tracker.register(
+                job_id, job_name=safe_name, project_root=real_cwd, job_dir=job_dir
+            )
+        except Exception:
+            # A submitted job without an ownership record would either leak
+            # resources or become unmanageable under a shared account.
+            await self._ssh.run(["scancel", "--", job_id], check=False)
+            raise
         return {
             "job_id": job_id,
             "job_name": safe_name,
@@ -137,13 +164,55 @@ class SlurmManager:
         }
 
     async def _submit_via_stdin(self, script: str):
-        quoted_dir = shlex.quote(self._cfg.jobs_dir)
+        await self._tracker.ensure_ready()
         res = await self._ssh.run_raw(
-            f"mkdir -p {quoted_dir} && sbatch --parsable",
+            "sbatch --parsable",
             stdin_text=script,
             check=True,
         )
         return res
+
+    @staticmethod
+    def _validate_command(command: list[str] | str) -> list[str]:
+        if isinstance(command, str):
+            values = [command]
+        elif isinstance(command, list):
+            values = command
+        else:
+            raise SlurmPolicyError("command must be a string or argv list")
+        if not values or len(values) > 256:
+            raise SlurmPolicyError("command must contain between 1 and 256 argv items")
+        result: list[str] = []
+        total = 0
+        for value in values:
+            if not isinstance(value, str) or not value or len(value) > 4096:
+                raise SlurmPolicyError("each command argv item must be a non-empty string of at most 4096 bytes")
+            if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+                raise SlurmPolicyError("command argv may not contain control characters")
+            result.append(value)
+            total += len(value)
+        if total > 128 * 1024:
+            raise SlurmPolicyError("command argv exceeds the script size limit")
+        return result
+
+    @staticmethod
+    def _validate_environment(environment: dict[str, str] | None) -> dict[str, str]:
+        if environment is None:
+            return {}
+        if not isinstance(environment, dict) or len(environment) > 128:
+            raise SlurmPolicyError("environment must contain at most 128 variables")
+        result: dict[str, str] = {}
+        total = 0
+        for key, value in environment.items():
+            if not isinstance(key, str) or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+                raise SlurmPolicyError(f"Invalid environment variable name: {key!r}")
+            if not isinstance(value, str) or len(value) > 8192 or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+                raise SlurmPolicyError("Environment values must be bounded strings without control characters")
+            result[key] = value
+            total += len(key) + len(value)
+        if total > 256 * 1024:
+            raise SlurmPolicyError("environment exceeds the script size limit")
+        return result
 
     def _render_script(self, *, job_name, cwd, cmd_argv, eff, environment) -> str:
         lines = [
@@ -162,8 +231,8 @@ class SlurmManager:
             lines.append(f"#SBATCH --gres=gpu:{eff['gpus']}")
         # stdout/stderr captured into the managed jobs dir (created post-submit)
         # We know the id only after sbatch; use %j so Slurm fills it in.
-        lines.append(f"#SBATCH --output={self._cfg.jobs_dir}/%j/stdout.log")
-        lines.append(f"#SBATCH --error={self._cfg.jobs_dir}/%j/stderr.log")
+        lines.append(f"#SBATCH --output={self._cfg.jobs_dir}/%j.stdout.log")
+        lines.append(f"#SBATCH --error={self._cfg.jobs_dir}/%j.stderr.log")
         lines.append("")
         for k, v in environment.items():
             lines.append(f"export {k}={shlex.quote(str(v))}")
@@ -253,8 +322,14 @@ class SlurmManager:
         entry = await self._tracker.require_owned(job_id)
         if stream not in ("stdout", "stderr"):
             raise SlurmPolicyError("stream must be 'stdout' or 'stderr'", requested=stream)
-        path = f"{entry['job_dir']}/{stream}.log"
-        cap = min(tail_bytes or self._cfg.shell.max_output_bytes, self._cfg.shell.max_output_bytes)
+        job_dir = await self._tracker.ensure_job_dir(job_id)
+        path = f"{job_dir}/{stream}.log"
+        if tail_bytes is None:
+            cap = self._cfg.shell.max_output_bytes
+        elif isinstance(tail_bytes, bool) or not isinstance(tail_bytes, int) or tail_bytes < 0:
+            raise SlurmPolicyError("tail_bytes must be a non-negative integer", requested=str(tail_bytes))
+        else:
+            cap = min(tail_bytes, self._cfg.shell.max_output_bytes)
         res = await self._ssh.run(
             ["tail", "-c", str(cap), "--", path], check=False, max_output=cap + 4096
         )
@@ -268,9 +343,16 @@ class SlurmManager:
 
     async def wait(self, job_id: str, *, timeout_seconds: int | None = None, poll_interval: int = 10) -> dict:
         entry = await self._tracker.require_owned(job_id)
-        deadline = min(timeout_seconds or self._cfg.wait_max_seconds, self._cfg.wait_max_seconds)
+        if timeout_seconds is None:
+            deadline = self._cfg.wait_max_seconds
+        elif isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds < 0:
+            raise SlurmPolicyError("timeout_seconds must be a non-negative integer", requested=str(timeout_seconds))
+        else:
+            deadline = min(timeout_seconds, self._cfg.wait_max_seconds)
         terminal = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED"}
         waited = 0.0
+        if isinstance(poll_interval, bool) or not isinstance(poll_interval, int) or poll_interval <= 0:
+            raise SlurmPolicyError("poll_interval must be a positive integer", requested=str(poll_interval))
         poll = max(2, min(poll_interval, 60))
         while True:
             st = await self.status(job_id)

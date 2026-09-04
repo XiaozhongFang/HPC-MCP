@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from ..config import Config
+from ..errors import PolicyDenied
 from ..filesystem.service import FileService
 from ..filesystem.transfer import TransferService
 from ..shell.safe_exec import SafeExec
@@ -33,6 +34,52 @@ class ToolDef:
     open_world: bool = False
 
 
+def validate_tool_args(tool: ToolDef, args: Any) -> dict[str, Any]:
+    """Validate the structural part of a tool schema before dispatch."""
+    if not isinstance(args, dict):
+        raise PolicyDenied("Tool arguments must be a JSON object")
+    properties = tool.schema.get("properties", {})
+    unknown = set(args) - set(properties)
+    if unknown or (tool.schema.get("additionalProperties") is False and unknown):
+        raise PolicyDenied(f"Unknown tool argument(s): {', '.join(sorted(map(str, unknown)))}")
+    missing = [name for name in tool.schema.get("required", []) if name not in args]
+    if missing:
+        raise PolicyDenied(f"Missing required tool argument(s): {', '.join(missing)}")
+    for name, value in args.items():
+        schema = properties.get(name)
+        if schema is not None and not _schema_value_valid(value, schema):
+            raise PolicyDenied(f"Invalid type or value for tool argument: {name}")
+    return args
+
+
+def _schema_value_valid(value: Any, schema: dict[str, Any]) -> bool:
+    if "oneOf" in schema:
+        return any(_schema_value_valid(value, option) for option in schema["oneOf"])
+    kind = schema.get("type")
+    valid = {
+        "string": isinstance(value, str),
+        "integer": isinstance(value, int) and not isinstance(value, bool),
+        "boolean": isinstance(value, bool),
+        "array": isinstance(value, list),
+        "object": isinstance(value, dict),
+    }.get(kind, True)
+    if not valid:
+        return False
+    if "minimum" in schema and value < schema["minimum"]:
+        return False
+    if "enum" in schema and value not in schema["enum"]:
+        return False
+    if kind == "array" and "items" in schema and not all(_schema_value_valid(item, schema["items"]) for item in value):
+        return False
+    if kind == "object" and isinstance(value, dict):
+        if schema.get("additionalProperties") is False and any(key not in schema.get("properties", {}) for key in value):
+            return False
+        additional = schema.get("additionalProperties")
+        if isinstance(additional, dict) and not all(_schema_value_valid(item, additional) for item in value.values()):
+            return False
+    return True
+
+
 def build_tools(
     cfg: Config,
     ssh: SshManager,
@@ -43,14 +90,39 @@ def build_tools(
 ) -> list[ToolDef]:
     root = cfg.root
 
-    def _str(p: str, desc: str) -> dict:
+    def _str(_name: str, desc: str) -> dict:
         return {"type": "string", "description": desc}
 
-    def _int(p: str, desc: str, default: int | None = None) -> dict:
+    def _int(_name: str, desc: str, default: int | None = None, *, minimum: int | None = None) -> dict:
         d: dict = {"type": "integer", "description": desc}
         if default is not None:
             d["default"] = default
+        if minimum is not None:
+            d["minimum"] = minimum
         return d
+
+    def _str_arg(args: dict, name: str, *, required: bool = True) -> str | None:
+        value = args.get(name)
+        if value is None and not required:
+            return None
+        if not isinstance(value, str) or not value:
+            raise PolicyDenied(f"{name} must be a non-empty string")
+        return value
+
+    def _int_arg(args: dict, name: str, default: int | None = None, *, minimum: int | None = None) -> int | None:
+        value = args.get(name, default)
+        if value is None and default is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or (minimum is not None and value < minimum):
+            bound = f" >= {minimum}" if minimum is not None else ""
+            raise PolicyDenied(f"{name} must be an integer{bound}")
+        return value
+
+    def _bool_arg(args: dict, name: str, default: bool = False) -> bool:
+        value = args.get(name, default)
+        if not isinstance(value, bool):
+            raise PolicyDenied(f"{name} must be a boolean")
+        return value
 
     abs_path = f"Absolute remote path inside {root}"
 
@@ -86,9 +158,9 @@ def build_tools(
     # ---------------------------------------------------------------- files
     async def files_list(args: dict) -> Any:
         return await files.list_dir(
-            args["path"],
-            recursive=bool(args.get("recursive", False)),
-            max_entries=args.get("max_entries"),
+            _str_arg(args, "path"),
+            recursive=_bool_arg(args, "recursive"),
+            max_entries=_int_arg(args, "max_entries", minimum=0),
         )
 
     tools.append(
@@ -113,7 +185,9 @@ def build_tools(
 
     async def files_read(args: dict) -> Any:
         return await files.read_file(
-            args["path"], max_bytes=args.get("max_bytes"), offset=int(args.get("offset", 0))
+            _str_arg(args, "path"),
+            max_bytes=_int_arg(args, "max_bytes", minimum=0),
+            offset=_int_arg(args, "offset", 0, minimum=0) or 0,
         )
 
     tools.append(
@@ -140,7 +214,9 @@ def build_tools(
     )
 
     async def files_write(args: dict) -> Any:
-        return await files.write_file(args["path"], args["content"], append=bool(args.get("append", False)))
+        path = _str_arg(args, "path")
+        content = _str_arg(args, "content")
+        return await files.write_file(path, content, append=_bool_arg(args, "append"))
 
     tools.append(
         ToolDef(
@@ -162,7 +238,7 @@ def build_tools(
     )
 
     async def files_mkdir(args: dict) -> Any:
-        return await files.mkdir(args["path"], parents=bool(args.get("parents", False)))
+        return await files.mkdir(_str_arg(args, "path"), parents=_bool_arg(args, "parents"))
 
     tools.append(
         ToolDef(
@@ -178,11 +254,12 @@ def build_tools(
                 "additionalProperties": False,
             },
             handler=files_mkdir,
+            destructive=True,
         )
     )
 
     async def files_delete(args: dict) -> Any:
-        return await files.delete(args["path"], recursive=bool(args.get("recursive", False)))
+        return await files.delete(_str_arg(args, "path"), recursive=_bool_arg(args, "recursive"))
 
     tools.append(
         ToolDef(
@@ -203,7 +280,7 @@ def build_tools(
     )
 
     async def files_upload(args: dict) -> Any:
-        return await transfer.upload(args["local_path"], args["remote_path"])
+        return await transfer.upload(_str_arg(args, "local_path"), _str_arg(args, "remote_path"))
 
     tools.append(
         ToolDef(
@@ -224,7 +301,7 @@ def build_tools(
     )
 
     async def files_download(args: dict) -> Any:
-        return await transfer.download(args["remote_path"], args["local_path"])
+        return await transfer.download(_str_arg(args, "remote_path"), _str_arg(args, "local_path"))
 
     tools.append(
         ToolDef(
@@ -246,7 +323,9 @@ def build_tools(
 
     # ---------------------------------------------------------------- shell
     async def shell_run(args: dict) -> Any:
-        return await safe_exec.run(args["command"], args.get("cwd"), timeout=args.get("timeout"))
+        return await safe_exec.run(
+            _str_arg(args, "command"), _str_arg(args, "cwd", required=False), timeout=_int_arg(args, "timeout", minimum=1)
+        )
 
     tools.append(
         ToolDef(
@@ -274,17 +353,20 @@ def build_tools(
 
     # ---------------------------------------------------------------- slurm
     async def slurm_submit(args: dict) -> Any:
+        command = args.get("command")
+        if not isinstance(command, (str, list)):
+            raise PolicyDenied("command must be a string or argv list")
         return await slurm.submit(
-            job_name=args.get("job_name", "job"),
-            working_directory=args["working_directory"],
-            command=args["command"],
-            partition=args.get("partition"),
-            nodes=int(args.get("nodes", 1)),
-            ntasks=int(args.get("ntasks", 1)),
-            cpus_per_task=int(args.get("cpus_per_task", 1)),
+            job_name=_str_arg(args, "job_name", required=False) or "job",
+            working_directory=_str_arg(args, "working_directory"),
+            command=command,
+            partition=_str_arg(args, "partition", required=False),
+            nodes=_int_arg(args, "nodes", 1, minimum=1) or 1,
+            ntasks=_int_arg(args, "ntasks", 1, minimum=1) or 1,
+            cpus_per_task=_int_arg(args, "cpus_per_task", 1, minimum=1) or 1,
             memory=args.get("memory"),
-            time_limit=args.get("time_limit"),
-            gpus=int(args.get("gpus", 0)),
+            time_limit=_str_arg(args, "time_limit", required=False),
+            gpus=_int_arg(args, "gpus", 0, minimum=0) or 0,
             environment=args.get("environment"),
         )
 
@@ -327,7 +409,7 @@ def build_tools(
     )
 
     async def slurm_status(args: dict) -> Any:
-        return await slurm.status(str(args["job_id"]))
+        return await slurm.status(_str_arg(args, "job_id"))
 
     tools.append(
         ToolDef(
@@ -361,7 +443,9 @@ def build_tools(
 
     async def slurm_output(args: dict) -> Any:
         return await slurm.output(
-            str(args["job_id"]), stream=args.get("stream", "stdout"), tail_bytes=args.get("tail_bytes")
+            _str_arg(args, "job_id"),
+            stream=args.get("stream", "stdout"),
+            tail_bytes=_int_arg(args, "tail_bytes", minimum=0),
         )
 
     tools.append(
@@ -385,7 +469,7 @@ def build_tools(
     )
 
     async def slurm_cancel(args: dict) -> Any:
-        return await slurm.cancel(str(args["job_id"]))
+        return await slurm.cancel(_str_arg(args, "job_id"))
 
     tools.append(
         ToolDef(
@@ -403,7 +487,7 @@ def build_tools(
     )
 
     async def slurm_accounting(args: dict) -> Any:
-        return await slurm.accounting(str(args["job_id"]))
+        return await slurm.accounting(_str_arg(args, "job_id"))
 
     tools.append(
         ToolDef(
@@ -423,9 +507,9 @@ def build_tools(
 
     async def jobs_wait(args: dict) -> Any:
         return await slurm.wait(
-            str(args["job_id"]),
-            timeout_seconds=args.get("timeout_seconds"),
-            poll_interval=int(args.get("poll_interval", 10)),
+            _str_arg(args, "job_id"),
+            timeout_seconds=_int_arg(args, "timeout_seconds", minimum=0),
+            poll_interval=_int_arg(args, "poll_interval", 10, minimum=1) or 10,
         )
 
     tools.append(

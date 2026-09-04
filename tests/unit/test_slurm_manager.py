@@ -84,6 +84,7 @@ class TestSubmit:
         assert res["job_id"] == "424242"
         assert "#SBATCH --cpus-per-task=4" in ssh.submitted_scripts[0]
         assert "julia --project=. t.jl" in ssh.submitted_scripts[0]
+        assert f"#SBATCH --output={ROOT}/.hpc-mcp/jobs/%j.stdout.log" in ssh.submitted_scripts[0]
         assert ssh.register["424242"]["job_name"] == "t"
 
     async def test_submit_escape_cwd_denied(self):
@@ -129,6 +130,17 @@ class TestOwnership:
         ssh = FakeSsh()
         with pytest.raises(SlurmPolicyError, match="not submitted"):
             await self._mgr(ssh).status("111")
+
+    async def test_cross_session_entry_denied(self):
+        ssh = FakeSsh()
+        cfg = make_cfg()
+        tracker = JobTracker(cfg, ssh)
+        ssh.register["111"] = {
+            "job_id": "111", "job_name": "old", "project_root": ROOT,
+            "job_dir": f"{ROOT}/.hpc-mcp/jobs/111", "tool_session": "another-session",
+        }
+        with pytest.raises(SlurmPolicyError, match="not submitted"):
+            await SlurmManager(cfg, ssh, tracker).status("111")
 
     async def test_cancel_untracked_denied(self):
         ssh = FakeSsh()

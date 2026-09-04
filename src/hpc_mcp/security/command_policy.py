@@ -89,6 +89,7 @@ _BARE_QUERY_OK = {"env": frozenset({""})}
 
 #: Shell metacharacters that are never permitted anywhere in the command.
 _FORBIDDEN_METACHARS = (";", "&", "|", ">", "<", "`", "$(", "${", "(", ")", "\n", "\r")
+_FORBIDDEN_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 
 class Verdict(Enum):
@@ -113,7 +114,10 @@ def _basename(exe: str) -> str:
 
 
 def _looks_like_path(token: str) -> bool:
-    return token.startswith("/") or token.startswith("./") or token.startswith("../")
+    # Any slash means the caller selected an executable by path.  Allowing
+    # ``subdir/cat`` based only on its basename lets a malicious file inside
+    # the sandbox replace a trusted system utility.
+    return "/" in token
 
 
 def classify(command: str, safe_commands: list[str]) -> Classification:
@@ -124,6 +128,8 @@ def classify(command: str, safe_commands: list[str]) -> Classification:
     """
     if not isinstance(command, str) or not command.strip():
         return Classification(Verdict.DENY, reason="Empty command")
+    if _FORBIDDEN_CONTROL.search(command):
+        return Classification(Verdict.DENY, reason="Control characters are not allowed in commands")
 
     # 1. Reject shell metacharacters outright.  Since we execute via argv
     #    (no shell), none of these are needed, and each one is a classic
@@ -155,12 +161,12 @@ def classify(command: str, safe_commands: list[str]) -> Classification:
     #    the allow-list -- this stops "copy julia to ./safe_name" style
     #    renames only when basename differs, while still blocking direct
     #    program execution like ./simulation.
-    if _looks_like_path(exe) and base not in safe_commands:
+    if _looks_like_path(exe):
         return Classification(
             Verdict.DENY,
             reason=(
                 f"Executing programs by path ({exe!r}) is not allowed on the login node. "
-                "Only whitelisted query commands may run here."
+                "Only whitelisted command basenames may run here."
             ),
             use_instead="hpc.slurm.submit",
         )
@@ -199,13 +205,9 @@ def classify(command: str, safe_commands: list[str]) -> Classification:
     # 7. Per-command argument vetting.
     arg_error = _vet_arguments(base, argv)
     if arg_error:
-        return Classification(Verdict.DENY, reason=arg_error, use_instead=_suggest(base))
+        return Classification(Verdict.DENY, reason=arg_error)
 
     return Classification(Verdict.ALLOW, argv=argv)
-
-
-def _suggest(base: str) -> str | None:
-    return None
 
 
 def _vet_arguments(base: str, argv: list[str]) -> str | None:
@@ -275,7 +277,18 @@ def _vet_arguments(base: str, argv: list[str]) -> str | None:
         for a in args:
             if a in ("-exec", "-execdir", "-ok", "-okdir", "-delete"):
                 return f"find {a} is not allowed (arbitrary command execution / deletion)"
+            if a in ("-L", "-H", "-follow"):
+                return "find symlink-following modes are not allowed outside the canonical sandbox"
         return None
+
+    if base == "du" and any(a in ("-L", "--dereference") for a in args):
+        return "du symlink dereferencing is not allowed"
+
+    if base == "ls" and any(a in ("-L", "--dereference") for a in args):
+        return "ls symlink dereferencing is not allowed"
+
+    if base == "printenv" and args:
+        return "printenv variable selection is not allowed; environment output is sanitized"
 
     if base in {"head", "tail", "cat", "grep", "du", "stat", "ls", "wc", "sort", "uniq", "echo"}:
         return None
@@ -287,11 +300,6 @@ def _vet_arguments(base: str, argv: list[str]) -> str | None:
         return None
 
     return None
-
-
-#: Matches obvious executable-looking tokens in shell-free strings (used by
-#: tests and documentation).
-EXECUTABLE_RE = re.compile(r"^[A-Za-z0-9_+.-]+$")
 
 
 def check_command(command: str, safe_commands: list[str]) -> list[str]:

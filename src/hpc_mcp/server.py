@@ -24,7 +24,7 @@ from .slurm.jobs import JobTracker
 from .slurm.manager import SlurmManager
 from .ssh.manager import SshManager
 from .ssh.sftp import SftpClient
-from .tools.registry import ToolDef, build_tools
+from .tools.registry import ToolDef, build_tools, validate_tool_args
 
 
 def _to_result(payload: Any) -> list[types.TextContent]:
@@ -51,6 +51,8 @@ def create_server(cfg: Config) -> tuple[Server, list[ToolDef]]:
     by_name = {t.name: t for t in tools}
 
     server: Server = Server("hpc-mcp", version=__version__)
+    # Keep the transport reachable for deterministic shutdown in run_server.
+    server._hpc_mcp_ssh = ssh  # type: ignore[attr-defined]
 
     async def on_list_tools(ctx: Any, params: Any) -> types.ListToolsResult:
         return types.ListToolsResult(
@@ -72,13 +74,18 @@ def create_server(cfg: Config) -> tuple[Server, list[ToolDef]]:
 
     async def on_call_tool(ctx: Any, params: types.CallToolRequestParams) -> types.CallToolResult:
         name = params.name
-        args: dict[str, Any] = dict(params.arguments or {})
+        raw_args = params.arguments or {}
         tool = by_name.get(name)
         if tool is None:
             return types.CallToolResult(
-                content=[types.TextContent(type="text", text=f"Unknown tool: {name}")],
+                content=[types.TextContent(type="text", text=f"Unknown tool: {sanitize(name)}")],
                 isError=True,
             )
+        try:
+            args = validate_tool_args(tool, raw_args)
+        except HpcMcpError as exc:
+            audit.record(tool=name, decision="DENY", reason=exc.user_message, args=raw_args if isinstance(raw_args, dict) else None)
+            return types.CallToolResult(content=_to_result(exc.user_message), isError=True)
         timer = ToolTimer()
         try:
             with timer:
@@ -112,6 +119,9 @@ async def run_server(cfg: Config) -> None:
         "hpc-mcp %s starting: host=%s user=%s root=%s partitions=%s",
         __version__, cfg.ssh.host, cfg.ssh.user, cfg.root, cfg.slurm.allowed_partitions,
     )
-    async with stdio_server() as (read_stream, write_stream):
-        init = server.create_initialization_options()
-        await server.run(read_stream, write_stream, init)
+    try:
+        async with stdio_server() as (read_stream, write_stream):
+            init = server.create_initialization_options()
+            await server.run(read_stream, write_stream, init)
+    finally:
+        await server._hpc_mcp_ssh.close()  # type: ignore[attr-defined]
