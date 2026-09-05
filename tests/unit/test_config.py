@@ -105,6 +105,28 @@ class TestBuildConfig:
         assert cfg.root == "/home/u/me"
         assert cfg.jobs_dir == "/home/u/me/.hpc-mcp/jobs"
 
+    def test_ssh_bin_cli(self, monkeypatch):
+        _base_env(monkeypatch)
+        cfg = build_config(NS(host="h", root="/home/u/me", ssh_bin="/usr/bin/ssh", sftp_bin="@/mnt/c/Windows/System32/OpenSSH/ssh.exe"))
+        assert cfg.ssh.ssh_bin == "/usr/bin/ssh"
+        assert cfg.ssh.sftp_bin == "@/mnt/c/Windows/System32/OpenSSH/ssh.exe"
+
+    def test_ssh_bin_env(self, monkeypatch):
+        _base_env(monkeypatch)
+        monkeypatch.setenv("HPC_MCP_HOST", "h")
+        monkeypatch.setenv("HPC_MCP_ROOT", "/home/u/me")
+        monkeypatch.setenv("HPC_MCP_SSH_BIN", "@/usr/bin/ssh")
+        cfg = build_config(NS())
+        assert cfg.ssh.ssh_bin == "@/usr/bin/ssh"
+
+    def test_ssh_bin_yaml(self, monkeypatch, tmp_path):
+        _base_env(monkeypatch)
+        p = tmp_path / "c.yaml"
+        p.write_text("host: h\nroot: /home/u/me\nssh:\n  ssh_bin: /usr/bin/ssh\n  sftp_bin: /usr/bin/sftp\n")
+        cfg = build_config(NS(config=str(p)))
+        assert cfg.ssh.ssh_bin == "/usr/bin/ssh"
+        assert cfg.ssh.sftp_bin == "/usr/bin/sftp"
+
     def test_bad_nested_section_is_config_error(self, monkeypatch, tmp_path):
         _base_env(monkeypatch)
         p = tmp_path / "c.yaml"

@@ -8,6 +8,11 @@ local_root: .                              # 本地上传/下载目录（默认�
 
 # identity_file: ~/.ssh/id_ed25519
 
+# 指定 ssh/sftp 可执行文件（WSL 环境需要时）。
+# 形式：纯名字（走 PATH）、绝对路径、或 '@' 前缀（同绝对路径）。
+# ssh_bin: /usr/bin/ssh
+# sftp_bin: @/mnt/c/Windows/System32/OpenSSH/ssh.exe
+
 ssh:
   port: 22
   connect_timeout: 15

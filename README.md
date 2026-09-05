@@ -102,6 +102,12 @@ python -m hpc_mcp --help
 ```bash
 hpc-mcp --host my-hpc --user shared_account \
   --root /home/shared_account/fangxiaozhong --local-root "$PWD"
+
+# 指定 ssh/sftp 可执行文件（WSL 环境需要时）：
+#   --ssh-bin  /usr/bin/ssh
+#   --ssh-bin  @/usr/bin/ssh
+#   --ssh-bin  @/mnt/c/Windows/System32/OpenSSH/ssh.exe
+#   --sftp-bin @/usr/bin/sftp
 ```
 
 ### 环境变量

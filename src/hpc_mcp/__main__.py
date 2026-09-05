@@ -35,6 +35,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--root", metavar="PATH", help="Remote user root directory the agent is confined to (required)")
     p.add_argument("--local-root", metavar="PATH", help="Local directory allowed for upload/download (default: current directory)")
     p.add_argument("--identity-file", metavar="PATH", help="SSH identity file (default from ~/.ssh/config)")
+    p.add_argument("--ssh-bin", metavar="PATH", help="ssh executable (e.g. /usr/bin/ssh, @/usr/bin/ssh, or @/mnt/c/Windows/System32/OpenSSH/ssh.exe; default: from PATH)")
+    p.add_argument("--sftp-bin", metavar="PATH", help="sftp executable (same forms as --ssh-bin; default: from PATH)")
     p.add_argument("--log-file", metavar="PATH", help="Append logs to this file (in addition to stderr)")
     p.add_argument("--log-level", metavar="LEVEL", help="Log level (DEBUG, INFO, WARNING; default INFO)")
     p.add_argument(

@@ -86,6 +86,13 @@ class SshConfig:
     # StrictHostKeyChecking: "yes" (pinned known_hosts) is the safe default;
     # "accept-new" tolerates first-contact key enrollment.
     strict_host_key_checking: str = "yes"
+    # Path to the ssh/sftp executables.  May be:
+    #   - None            -> search PATH (default)
+    #   - "ssh" / "sftp"  -> search PATH
+    #   - "/abs/path"     -> exact path (e.g. WSL: "/usr/bin/ssh")
+    #   - "@/abs/path"    -> WSL '@' prefix, same as exact path
+    ssh_bin: str | None = None
+    sftp_bin: str | None = None
 
 
 @dataclass
@@ -262,6 +269,12 @@ def build_config(cli_args: Any | None = None, environ: dict[str, str] | None = N
             _env("STRICT_HOST_KEY_CHECKING", env),
             ssh_file.get("strict_host_key_checking"),
             default="yes",
+        ),
+        ssh_bin=_coalesce(
+            cli.get("ssh_bin"), _env("SSH_BIN", env), ssh_file.get("ssh_bin"), file_data.get("ssh_bin")
+        ),
+        sftp_bin=_coalesce(
+            cli.get("sftp_bin"), _env("SFTP_BIN", env), ssh_file.get("sftp_bin"), file_data.get("sftp_bin")
         ),
     )
     if ssh.strict_host_key_checking not in ("yes", "accept-new"):
