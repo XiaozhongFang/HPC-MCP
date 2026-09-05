@@ -18,26 +18,74 @@
 
 ## 1. 安装
 
+**强烈建议用独立的虚拟环境安装**，不要直接 `pip install --user` 塞进系统
+`~/.local`——否则会和系统里已有的包（torch、httpcore 等）互相冲突，出现
+`UNKNOWN-0.0.0` 空壳包、`pip's dependency resolver does not take into account...`
+警告。
+
+### 方案 A（推荐）：virtualenv 隔离环境
+
+系统缺少 `python3-venv` 时用 virtualenv（纯用户级，无需 root）：
+
+```bash
+# 1. 安装 virtualenv（一次性）
+python3 -m pip install --user virtualenv
+
+# 2. 创建项目专用环境（只建一次，以后一直用）
+python3 -m virtualenv ~/venvs/hpc-mcp
+
+# 3. 激活并安装 hpc-mcp
+source ~/venvs/hpc-mcp/bin/activate
+cd ~/git_repo/HPC-MCP
+pip install .
+
+# 4. 使用
+hpc-mcp --version        # 应输出 hpc-mcp 0.1.0
+hpc-mcp --help
+```
+
+> 如果系统已装 `python3-venv`，可改用标准库：
+> `python3 -m venv ~/venvs/hpc-mcp`（其余步骤相同）。
+
+验证时若 `hpc-mcp` 找不到，检查是否已激活环境，或直接用全路径：
+
+```bash
+~/venvs/hpc-mcp/bin/hpc-mcp --version
+```
+
+给 Codex / Reasonix 注册时，把命令换成该环境的全路径：
+
+```bash
+codex mcp add hpc ... -- ~/venvs/hpc-mcp/bin/hpc-mcp
+```
+
+### 方案 B：conda
+
+如果你已经用 conda：
+
+```bash
+conda create -n hpc-mcp python=3.10
+conda activate hpc-mcp
+cd ~/git_repo/HPC-MCP
+pip install .
+```
+
+### 方案 C：直接装进 ~/.local（不推荐，仅临时用）
+
 ```bash
 cd ~/git_repo/HPC-MCP
-
-# 推荐：先升级 pip（旧 pip + 旧 setuptools 会打出 UNKNOWN-0.0.0 空壳包）
-python3 -m pip install --user -U pip
-
-# 安装本包
 python3 -m pip install --user .
 ```
 
-验证：
+> 若出现 `UNKNOWN-0.0.0` 或依赖冲突警告，说明 pip/setuptools 太旧或
+> `~/.local` 已混乱，请改用方案 A。
 
-```bash
-export PATH="$HOME/.local/bin:$PATH"   # 建议写进 ~/.bashrc
-hpc-mcp --version                       # 应输出 hpc-mcp 0.1.0
-hpc-mcp --help                          # 应列出所有参数
-```
+### 遇到问题先看
 
-> 如果 `pip install .` 输出里出现 `UNKNOWN-0.0.0`，说明 pip/setuptools 太旧，
-> 先 `python3 -m pip install --user -U pip setuptools` 再重装即可。
+- `pip install .` 出现 `UNKNOWN-0.0.0` → pip/setuptools 太旧，环境没隔离。
+- 出现 `ERROR: pip's dependency resolver does not currently take into account...`
+  → 系统 `~/.local` 里有别的包冲突（torch/httpcore 等）。**不影响 hpc-mcp 运行**，
+  但说明该环境已混装，建议换虚拟环境。
 
 ---
 
@@ -199,9 +247,11 @@ reasonix mcp add hpc \
 | 启动后停在 `starting: ...` 不动 | **正常**，stdio server 在等客户端输入 | 不用管，去客户端里调用工具；或用 `--check` 验证 |
 | `--check` 报 `Connection timed out` | **网络不通**（内网 IP 需 VPN） | 连 VPN / 配跳板机，再 `ssh` 手动测 |
 | `--check` 报 `Permission denied` | 没免密 | `ssh-copy-id` 配 key |
+| `--check` 报 `getsockname failed: Not a socket` | SSH 控制 socket 复用异常（常见于 WSL 或旧版安装） | 更新并重装 hpc-mcp；新版强制使用独立的普通 `ssh` 进程 |
 | 首次连接问 `Are you sure ... yes/no?` | 主机密钥没固定 | 手动 `ssh` 一次输入 yes；或配置 `strict_host_key_checking: accept-new` |
 | 工具调用全被拒 `No Slurm partitions are allowed` | 分区白名单为空 | 配置 `slurm.allowed_partitions` |
-| `pip install .` 得到 `UNKNOWN-0.0.0` | pip/setuptools 太旧 | `python3 -m pip install --user -U pip` 后重装 |
+| `pip install .` 得到 `UNKNOWN-0.0.0` | pip/setuptools 太旧 | 用虚拟环境重装（见第 1 节方案 A） |
+| 安装时提示 `ERROR: pip's dependency resolver does not currently take into account...`（torch/httpcore 冲突） | 系统 `~/.local` 已混装其它包 | **不影响 hpc-mcp 运行**；建议改用虚拟环境隔离（第 1 节方案 A） |
 
 ---
 
