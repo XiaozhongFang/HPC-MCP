@@ -170,6 +170,8 @@ hpc-mcp --host 192.168.10.10 --user nudt_liujie05 \
 | `--local-root` | **本地**允许上传/下载的目录（默认=启动时所在目录） | `HPC_MCP_LOCAL_ROOT` | 可选 |
 | `--port` | SSH 端口（默认 22） | `HPC_MCP_PORT` | 可选 |
 | `--identity-file` | 私钥路径（默认用 `~/.ssh/config`） | `HPC_MCP_IDENTITY_FILE` | 可选 |
+| `--ssh-bin` | ssh 可执行文件路径，如 `/usr/bin/ssh`、`@/usr/bin/ssh`、`@/mnt/c/.../ssh.exe` | `HPC_MCP_SSH_BIN` | 可选 |
+| `--sftp-bin` | sftp 可执行文件路径（形式同 `--ssh-bin`） | `HPC_MCP_SFTP_BIN` | 可选 |
 | `--config` | YAML 配置文件路径 | — | 可选 |
 | `--check` | 只验证连通性然后退出 | — | 可选 |
 

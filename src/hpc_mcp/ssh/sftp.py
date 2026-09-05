@@ -9,12 +9,12 @@ checks itself.
 from __future__ import annotations
 
 import asyncio
-import shutil
 from pathlib import Path
 
 from ..config import Config
 from ..errors import RemoteCommandError, SshError
 from ..logging import get_logger
+from .manager import _resolve_bin
 
 _MAX_TRANSFER_BYTES = 2 * 1024 * 1024 * 1024  # hard ceiling: 2 GiB
 
@@ -23,14 +23,12 @@ class SftpClient:
     def __init__(self, cfg: Config) -> None:
         self._cfg = cfg
         self._log = get_logger()
-        self._bin = shutil.which("sftp")
-        if self._bin is None:
-            raise SshError("OpenSSH 'sftp' client not found in PATH")
+        self._bin = _resolve_bin(cfg.ssh.sftp_bin, "sftp")
 
     def _base_argv(self) -> list[str]:
         cfg = self._cfg.ssh
         argv = [
-            self._bin or "sftp",
+            self._bin,
             "-b", "-",  # batch mode from stdin
             "-o", "BatchMode=yes",
             "-o", f"ConnectTimeout={cfg.connect_timeout}",

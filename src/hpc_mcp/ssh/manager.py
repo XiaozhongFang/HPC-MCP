@@ -12,9 +12,10 @@ Design notes:
   (filesystem service, Slurm manager, safe-exec) that has already passed
   the relevant policy layer.  The remote argv is re-serialized with
   :func:`shlex.join` so the remote shell parses it exactly as one argv.
-* ControlMaster connection sharing is used when available to keep latency
-  low; the control socket lives in a private temp dir and is cleaned up on
-  exit.
+* Each command uses a regular OpenSSH process.  ControlMaster multiplexing is
+  intentionally not forced: some supported environments (notably WSL and
+  SSH wrappers) expose a non-socket ControlPath and fail with opaque errors
+  such as ``getsockname failed: Not a socket`` even though plain ``ssh`` works.
 """
 
 from __future__ import annotations
@@ -22,12 +23,41 @@ from __future__ import annotations
 import asyncio
 import shlex
 import shutil
-import tempfile
 from dataclasses import dataclass
 
 from ..config import Config
 from ..errors import RemoteCommandError, SshError
 from ..logging import get_logger
+
+
+def _resolve_bin(configured: str | None, name: str) -> str:
+    """Resolve the ssh/sftp executable path.
+
+    ``configured`` may be:
+      - None          -> search PATH for ``name``
+      - "name"        -> search PATH
+      - "/abs/path"   -> use exactly
+      - "@/abs/path"  -> WSL '@' prefix, strip and use exactly
+    Raises SshError when a configured path is unusable or PATH lookup fails.
+    """
+    if configured:
+        value = configured.strip()
+        if value.startswith("@"):
+            value = value[1:]
+        if "/" in value or "\\" in value:
+            # explicit path
+            if not value or value.startswith("~") or "\x00" in value:
+                raise SshError(f"Invalid {name} executable path: {configured!r}")
+            return value
+        # bare name: let PATH decide, but validate it resolves
+        found = shutil.which(value)
+        if found is None:
+            raise SshError(f"OpenSSH client ('{value}') not found in PATH")
+        return found
+    found = shutil.which(name)
+    if found is None:
+        raise SshError(f"OpenSSH client ('{name}') not found in PATH")
+    return found
 
 
 @dataclass
@@ -51,11 +81,7 @@ class SshManager:
     def __init__(self, cfg: Config) -> None:
         self._cfg = cfg
         self._log = get_logger()
-        self._control_dir: tempfile.TemporaryDirectory[str] | None = None
-        self._control_path: str | None = None
-        self._ssh_bin = shutil.which("ssh")
-        if self._ssh_bin is None:
-            raise SshError("OpenSSH client ('ssh') not found in PATH")
+        self._ssh_bin = _resolve_bin(cfg.ssh.ssh_bin, "ssh")
         self._lock = asyncio.Lock()
 
     # -- connection setup ---------------------------------------------------
@@ -63,22 +89,16 @@ class SshManager:
     def _base_argv(self) -> list[str]:
         cfg = self._cfg.ssh
         argv = [
-            self._ssh_bin or "ssh",
+            self._ssh_bin,
             "-o", "BatchMode=yes",
             "-o", f"ConnectTimeout={cfg.connect_timeout}",
             "-o", "ServerAliveInterval=15",
             "-o", "ServerAliveCountMax=2",
             "-o", f"StrictHostKeyChecking={cfg.strict_host_key_checking}",
             "-o", "NumberOfPasswordPrompts=0",
-        ]
-        # Connection sharing (speeds up bursts of short commands)
-        if self._control_path is None:
-            self._control_dir = tempfile.TemporaryDirectory(prefix="hpc-mcp-ssh-")
-            self._control_path = f"{self._control_dir.name}/ctl"
-        argv += [
-            "-o", "ControlMaster=auto",
-            "-o", f"ControlPath={self._control_path}",
-            "-o", "ControlPersist=60",
+            # Do not inherit a broken global ControlPath from the user's SSH
+            # config; every invocation must behave like a standalone ssh call.
+            "-o", "ControlMaster=no",
         ]
         if cfg.port and cfg.port != 22:
             argv += ["-p", str(cfg.port)]
@@ -91,27 +111,8 @@ class SshManager:
         return argv
 
     async def close(self) -> None:
-        """Shut down the shared control connection, if any."""
-        async with self._lock:
-            if self._control_path:
-                argv = self._base_argv()[:1] + [
-                    "-O", "exit", "-o", f"ControlPath={self._control_path}",
-                ]
-                destination = self._cfg.ssh.host or ""
-                if self._cfg.ssh.user:
-                    destination = f"{self._cfg.ssh.user}@{self._cfg.ssh.host}"
-                argv += ["--", destination]
-                try:
-                    proc = await asyncio.create_subprocess_exec(
-                        *argv, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
-                    )
-                    await asyncio.wait_for(proc.wait(), timeout=5)
-                except (OSError, asyncio.TimeoutError):
-                    pass
-            if self._control_dir:
-                self._control_dir.cleanup()
-                self._control_dir = None
-                self._control_path = None
+        """Keep the transport lifecycle API for server shutdown compatibility."""
+        return None
 
     # -- command execution ---------------------------------------------------
 
