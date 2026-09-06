@@ -9,7 +9,7 @@ from hpc_mcp.errors import PathSandboxError, PolicyDenied
 from hpc_mcp.filesystem.service import FileService
 from hpc_mcp.ssh.manager import RemoteResult
 
-ROOT = "/home/shared_account/fangxiaozhong"
+ROOT = "/home/shared_account/alice"
 
 
 def make_cfg() -> Config:

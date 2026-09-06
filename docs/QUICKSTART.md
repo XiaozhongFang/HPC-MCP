@@ -96,13 +96,13 @@ server 一启动工具调用就会全部失败（`Permission denied`），而且
 ```bash
 # 关键：加 -o BatchMode=yes 模拟 hpc-mcp 的连接方式，
 # 如果这行能直接返回 OK（不询问密码），说明免密已就绪：
-ssh -o BatchMode=yes -o ConnectTimeout=10 alice@192.168.10.10 "echo OK"
+ssh -o BatchMode=yes -o ConnectTimeout=10 username@192.168.12.12 "echo OK"
 ```
 
 - 能打印 `OK` → 免密已配置，直接继续第 3 步。
 - 报 `Permission denied (publickey...)` → **还没免密**，先配：
   ```bash
-  ssh-copy-id alice@192.168.10.10   # 会要一次密码，之后就不用
+  ssh-copy-id username@192.168.12.12   # 会要一次密码，之后就不用
   ```
   然后重跑上面的 BatchMode 确认命令。
 - 报 `Connection timed out` → 网络不通，先连 VPN / 配跳板机（见第 2 节）。
@@ -117,7 +117,7 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 alice@192.168.10.10 "echo OK"
 hpc-mcp 底层用的是系统 OpenSSH，**一切 ssh 问题先在终端里复现**。先手动测：
 
 ```bash
-ssh alice@192.168.10.10 "echo OK && hostname"
+ssh username@192.168.12.12 "echo OK && hostname"
 ```
 
 三种结果：
@@ -125,12 +125,12 @@ ssh alice@192.168.10.10 "echo OK && hostname"
 | 结果 | 含义 | 怎么办 |
 |---|---|---|
 | 打印 `OK` + 主机名 | 免密 + 网络都通 | 直接进第 3 步 |
-| 卡在 `password:` | 没有免密 | 配 SSH key：`ssh-copy-id alice@192.168.10.10` |
+| 卡在 `password:` | 没有免密 | 配 SSH key：`ssh-copy-id username@192.168.12.12` |
 | `Connection timed out` / 100% 丢包 | **网络根本不通** | 见下面“网络不通” |
 
 ### 网络不通（最常见）
 
-`192.168.10.10` 是**内网地址**。如果你当前不在校园网/没连 VPN，从外网是连不上的。
+`192.168.12.12` 是**内网地址**。如果你当前不在校园网/没连 VPN，从外网是连不上的。
 
 - 先确认平时怎么上的：要不要先连 VPN？要不要走跳板机？
 - 需要 VPN：连上 VPN 再测。
@@ -142,15 +142,15 @@ ssh alice@192.168.10.10 "echo OK && hostname"
 
 ```sshconfig
 # ~/.ssh/config
-Host 192.168.10.10
-    HostName 192.168.10.10
-    User alice
+Host 192.168.12.12
+    HostName 192.168.12.12
+    User username
     IdentityFile ~/.ssh/id_ed25519
     # 需要跳板机时打开下面这行（把 jump-host 换成你的跳板）：
     # ProxyJump jump-host
 ```
 
-配好后终端测 `ssh 192.168.10.10 "echo OK"` 能通，hpc-mcp 就用 `--host 192.168.10.10`。
+配好后终端测 `ssh 192.168.12.12 "echo OK"` 能通，hpc-mcp 就用 `--host 192.168.12.12`。
 
 ---
 
@@ -160,11 +160,11 @@ Host 192.168.10.10
 
 ```bash
 hpc-mcp \
-  --host 192.168.10.10 \
-  --user alice \
+  --host 192.168.12.12 \
+  --user username \
   --ssh-bin /mnt/c/Windows/System32/OpenSSH/ssh.exe \
   --sftp-bin /mnt/c/Windows/System32/OpenSSH/sftp.exe \
-  --root /home/home/alice/fangxiaozhong \
+  --root /home/username/alice \
   --local-root "$PWD" \
   --check
 ```
@@ -194,7 +194,7 @@ hpc-mcp \
 
 **关于 `--local-root`**：它限制 `hpc.files.upload`/`download` 能访问的**本地**目录范围，防止 Agent 读你本地的 `.ssh` 等敏感目录。一般设为当前项目目录（`$PWD`）即可。**它不是必填**，不传就默认当前目录。
 
-**关于 `--root`**：这是远程集群上**专属于你的子目录**（因为登录用的是共享账号 `alice`）。你填的 `/home/home/alice/fangxiaozhong` 就是你在这个共享账号下的个人空间——完全正确。
+**关于 `--root`**：这是远程集群上**专属于你的子目录**（因为登录用的是共享账号 `username`）。你填的 `/home/username/alice` 就是你在这个共享账号下的个人空间——完全正确。
 
 ---
 
@@ -204,11 +204,11 @@ hpc-mcp \
 
 ```bash
 mkdir -p ~/.config/hpc-mcp
-cat > ~/.config/hpc-mcp/192.168.10.10.yaml <<'EOF'
-host: 192.168.10.10                                  # ~/.ssh/config 里的 Host 别名
-user: alice
-root: /home/home/alice/fangxiaozhong
-local_root: /home/fangxiaozhong               # 本地允许目录
+cat > ~/.config/hpc-mcp/192.168.12.12.yaml <<'EOF'
+host: 192.168.12.12                                  # ~/.ssh/config 里的 Host 别名
+user: username
+root: /home/username/alice
+local_root: /home/alice               # 本地允许目录
 ssh_bin: /mnt/c/Windows/System32/OpenSSH/ssh.exe
 sftp_bin: /mnt/c/Windows/System32/OpenSSH/sftp.exe
 
@@ -223,7 +223,7 @@ EOF
 启动 / 自检：
 
 ```bash
-hpc-mcp --config ~/.config/hpc-mcp/192.168.10.10.yaml --check
+hpc-mcp --config ~/.config/hpc-mcp/192.168.12.12.yaml --check
 ```
 
 > 注意：`allowed_partitions` 默认是**空**（= 拒绝一切提交，fail-closed）。
@@ -253,10 +253,10 @@ hpc-mcp --config ~/.config/hpc-mcp/192.168.10.10.yaml --check
 
 ```bash
 codex mcp add hpc \
-  --env HPC_MCP_HOST=192.168.10.10 \
-  --env HPC_MCP_USER=alice \
-  --env HPC_MCP_ROOT=/home/home/alice/fangxiaozhong \
-  --env HPC_MCP_LOCAL_ROOT=/home/fangxiaozhong \
+  --env HPC_MCP_HOST=192.168.12.12 \
+  --env HPC_MCP_USER=username \
+  --env HPC_MCP_ROOT=/home/username/alice \
+  --env HPC_MCP_LOCAL_ROOT=/home/alice \
   --env HPC_MCP_ALLOWED_PARTITIONS=thcp1 \
   --env HPC_MCP_SSH_BIN=/mnt/c/Windows/System32/OpenSSH/ssh.exe \
   --env HPC_MCP_SFTP_BIN=/mnt/c/Windows/System32/OpenSSH/sftp.exe \
@@ -267,10 +267,10 @@ codex mcp add hpc \
 
 ```bash
 reasonix mcp add hpc \
-  --env HPC_MCP_HOST=192.168.10.10 \
-  --env HPC_MCP_USER=alice \
-  --env HPC_MCP_ROOT=/home/home/alice/fangxiaozhong \
-  --env HPC_MCP_LOCAL_ROOT=/home/fangxiaozhong \
+  --env HPC_MCP_HOST=192.168.12.12 \
+  --env HPC_MCP_USER=username \
+  --env HPC_MCP_ROOT=/home/username/alice \
+  --env HPC_MCP_LOCAL_ROOT=/home/alice \
   --env HPC_MCP_ALLOWED_PARTITIONS=thcp1 \
   --env HPC_MCP_SSH_BIN=/mnt/c/Windows/System32/OpenSSH/ssh.exe \
   --env HPC_MCP_SFTP_BIN=/mnt/c/Windows/System32/OpenSSH/sftp.exe \

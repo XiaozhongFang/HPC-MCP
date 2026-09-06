@@ -5,7 +5,7 @@ import pytest
 from hpc_mcp.errors import PathSandboxError
 from hpc_mcp.security.path_policy import check_canonical_parent, is_within, validate_path
 
-ROOT = "/home/shared_account/fangxiaozhong"
+ROOT = "/home/shared_account/alice"
 
 
 class TestAllowedPaths:
@@ -77,7 +77,7 @@ class TestTraversalDenied:
             validate_path(path, ROOT)
 
     def test_prefix_sibling_not_allowed(self) -> None:
-        # /home/shared_account/fangxiaozhong_evil merely shares a string prefix
+        # /home/shared_account/alice_evil merely shares a string prefix
         with pytest.raises(PathSandboxError):
             validate_path(ROOT + "_evil/x", ROOT)
 

@@ -5,7 +5,7 @@ from hpc_mcp.errors import CommandPolicyError
 from hpc_mcp.shell.safe_exec import SafeExec
 from hpc_mcp.ssh.manager import RemoteResult
 
-ROOT = "/home/shared_account/fangxiaozhong"
+ROOT = "/home/shared_account/alice"
 
 
 class FakeSSH:

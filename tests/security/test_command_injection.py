@@ -15,7 +15,7 @@ class TestAllowed:
         [
             "pwd",
             "ls -la",
-            "ls -la /home/shared_account/fangxiaozhong/project",
+            "ls -la /home/shared_account/alice/project",
             "find . -maxdepth 2 -type f",
             "stat file.txt",
             "du -sh .",

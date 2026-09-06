@@ -5,7 +5,7 @@ import pytest
 from hpc_mcp.errors import PathSandboxError
 from hpc_mcp.security.path_policy import check_canonical_parent
 
-ROOT = "/home/shared_account/fangxiaozhong"
+ROOT = "/home/shared_account/alice"
 
 
 class TestSymlinkCanonicalization:
@@ -21,7 +21,7 @@ class TestSymlinkCanonicalization:
             check_canonical_parent("/home/shared_account/other_user", "secret.txt", ROOT)
 
     def test_link_inside_root_allowed(self) -> None:
-        # allowed/link -> /home/shared_account/fangxiaozhong/data
+        # allowed/link -> /home/shared_account/alice/data
         candidate = check_canonical_parent(ROOT + "/data", "results.txt", ROOT)
         assert candidate == ROOT + "/data/results.txt"
 

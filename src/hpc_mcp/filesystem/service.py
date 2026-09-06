@@ -86,10 +86,12 @@ class FileService:
     async def list_dir(self, path: str, *, recursive: bool = False, max_entries: int | None = None) -> list[dict]:
         real = await self.resolve_existing(path)
         cap = self._bounded_cap(max_entries, self._cfg.files.max_list_entries, "max_entries")
+        # note: find -printf needs a literal backslash-n, so use a raw string
+        fmt = r"%y %s %p\n"
         if recursive:
-            argv = ["find", real, "-mindepth", "1", "-maxdepth", "8", "-printf", "%y %s %p\n"]
+            argv = ["find", real, "-mindepth", "1", "-maxdepth", "8", "-printf", fmt]
         else:
-            argv = ["find", real, "-mindepth", "1", "-maxdepth", "1", "-printf", "%y %s %p\n"]
+            argv = ["find", real, "-mindepth", "1", "-maxdepth", "1", "-printf", fmt]
         res = await self._ssh.run(argv, check=True)
         entries: list[dict] = []
         for line in res.stdout_text.splitlines():

@@ -8,7 +8,7 @@ from hpc_mcp.slurm.jobs import JobTracker
 from hpc_mcp.slurm.manager import SlurmManager
 from hpc_mcp.ssh.manager import RemoteResult
 
-ROOT = "/home/shared_account/fangxiaozhong"
+ROOT = "/home/shared_account/alice"
 
 
 def make_cfg() -> Config:

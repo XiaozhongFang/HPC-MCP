@@ -40,7 +40,7 @@ Codex / Reasonix (Agent)
 HPC 常使用共享账号（如 `/home/shared_account/`）。该 home 目录**不等于**用户自己的目录。必须配置：
 
 ```
-HPC_MCP_ROOT=/home/shared_account/fangxiaozhong
+HPC_MCP_ROOT=/home/shared_account/alice
 export HPC_MCP_LOCAL_ROOT=$PWD       # 上传/下载允许访问的本地目录
 ```
 
@@ -88,7 +88,7 @@ export HPC_MCP_LOCAL_ROOT=$PWD       # 上传/下载允许访问的本地目录
 
 ```bash
 hpc-mcp --host my-hpc --user shared_account \
-  --root /home/shared_account/fangxiaozhong --local-root "$PWD"
+  --root /home/shared_account/alice --local-root "$PWD"
 
 # 指定 ssh/sftp 可执行文件（WSL 环境需要时）：
 #   --ssh-bin  /usr/bin/ssh
@@ -102,7 +102,7 @@ hpc-mcp --host my-hpc --user shared_account \
 ```bash
 export HPC_MCP_HOST=my-hpc
 export HPC_MCP_USER=shared_account
-export HPC_MCP_ROOT=/home/shared_account/fangxiaozhong
+export HPC_MCP_ROOT=/home/shared_account/alice
 export HPC_MCP_LOCAL_ROOT=$PWD
 export HPC_MCP_ALLOWED_PARTITIONS=compute,debug
 export HPC_MCP_MAX_CPUS=64
@@ -116,7 +116,7 @@ export HPC_MCP_MAX_TIME=24:00:00
 ```yaml
 host: my-hpc
 user: shared_account
-root: /home/shared_account/fangxiaozhong
+root: /home/shared_account/alice
 local_root: /path/to/local/project
 
 slurm:
@@ -156,7 +156,7 @@ ssh-copy-id my-hpc                      # 若上面失败，先配免密（要�
 ### 连通性自检
 
 ```bash
-hpc-mcp --host my-hpc --root /home/shared_account/fangxiaozhong --check
+hpc-mcp --host my-hpc --root /home/shared_account/alice --check
 ```
 
 ## MCP 客户端集成
@@ -167,7 +167,7 @@ hpc-mcp --host my-hpc --root /home/shared_account/fangxiaozhong --check
 codex mcp add hpc \
   --env HPC_MCP_HOST=my-hpc \
   --env HPC_MCP_USER=shared_account \
-  --env HPC_MCP_ROOT=/home/shared_account/fangxiaozhong \
+  --env HPC_MCP_ROOT=/home/shared_account/alice \
   --env HPC_MCP_ALLOWED_PARTITIONS=compute \
   -- hpc-mcp
 ```
@@ -177,7 +177,7 @@ codex mcp add hpc \
 ```bash
 reasonix mcp add hpc \
   --env HPC_MCP_HOST=my-hpc \
-  --env HPC_MCP_ROOT=/home/shared_account/fangxiaozhong \
+  --env HPC_MCP_ROOT=/home/shared_account/alice \
   --env HPC_MCP_ALLOWED_PARTITIONS=compute \
   hpc-mcp
 ```
@@ -214,7 +214,7 @@ reasonix mcp add hpc \
   "tool": "hpc.slurm.submit",
   "arguments": {
     "job_name": "demo-test",
-    "working_directory": "/home/shared_account/fangxiaozhong/demo_benchmark",
+    "working_directory": "/home/shared_account/alice/demo_benchmark",
     "partition": "compute",
     "cpus_per_task": 8,
     "time_limit": "00:30:00",
@@ -230,7 +230,7 @@ reasonix mcp add hpc \
 {
   "tool": "hpc.slurm.submit",
   "arguments": {
-    "command": "/home/shared_account/fangxiaozhong/proj/run.sh"
+    "command": "/home/shared_account/alice/proj/run.sh"
   }
 }
 ```
