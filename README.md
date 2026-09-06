@@ -161,6 +161,30 @@ hpc-mcp --host my-hpc --root /home/shared_account/alice --check
 
 ## MCP 客户端集成
 
+### 推荐：一条命令自动注册（`hpc-mcp mcp-add`）
+
+安装好之后，用 `mcp-add` 自动把 hpc-mcp 注册进 Codex 和 Reasonix 的配置。
+它会写入 **hpc-mcp 可执行文件的绝对路径**（自动检测当前 conda/venv 里的
+入口），因此**不需要**在启动 codex/reasonix 的 shell 里激活该环境：
+
+```bash
+# 使用你的配置文件（host/root/分区等从配置读取）
+hpc-mcp mcp-add --config ~/.config/hpc-mcp/192.168.10.10.yaml
+
+# 或直接传参
+hpc-mcp mcp-add --host my-hpc --user shared_account --root /home/shared_account/alice
+```
+
+效果：
+- `~/.codex/config.toml` 写入 `[mcp_servers.hpc]`（绝对路径 + 所需环境变量）
+- `~/.reasonix/config.toml` 写入 hpc plugin（绝对路径 + 所需环境变量）
+- 只新增/更新 hpc 段，**不破坏**你已有的其它 MCP server / provider 配置
+- 幂等：重复运行不会产生重复段
+
+改完后**重启 Codex / Reasonix** 即可，无需在 conda 环境里启动客户端。
+
+### 手动方式（可选）
+
 ### Codex
 
 ```bash
@@ -182,7 +206,8 @@ reasonix mcp add hpc \
   hpc-mcp
 ```
 
-两者都是 stdio argv 方式启动，无需 shell。
+两者都是 stdio argv 方式启动，无需 shell。注意手动方式里 `hpc-mcp` 若
+不在 PATH，需换成绝对路径（如 `/path/to/conda/envs/hpc-mcp/bin/hpc-mcp`）。
 
 ## 工具清单（16 个）
 
