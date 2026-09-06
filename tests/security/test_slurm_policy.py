@@ -65,9 +65,15 @@ class TestPartitionAbuse:
                 memory=None, time_limit=None, gpus=0,
             )
 
-    def test_ambiguous_partition_requires_choice(self) -> None:
+    def test_default_partition_picked_by_server(self) -> None:
+        # with multiple allowed partitions and no hint, the server picks the
+        # first one; the agent never sees partition names
+        eff = ok_request(partition=None)
+        assert eff["partition"] == "compute"
+
+    def test_partition_hint_must_be_allowed(self) -> None:
         with pytest.raises(SlurmPolicyError):
-            ok_request(partition=None)
+            ok_request(partition="not-allowed")
 
 
 class TestResourceAbuse:

@@ -86,17 +86,21 @@ def validate_job_request(
     cfg: SlurmConfig,
     *,
     partition: str | None,
-    nodes: int,
-    ntasks: int,
-    cpus_per_task: int,
-    memory: str | int | None,
-    time_limit: str | None,
-    gpus: int,
+    nodes: int | None = None,
+    ntasks: int | None = None,
+    cpus_per_task: int | None = None,
+    memory: str | int | None = None,
+    time_limit: str | None = None,
+    gpus: int | None = None,
     active_jobs: int = 0,
 ) -> dict:
     """Validate a submit request against policy.  Returns the effective,
     clamped-or-defaulted parameters on success; raises on violation.
     """
+    nodes = 1 if nodes is None else nodes
+    ntasks = 1 if ntasks is None else ntasks
+    cpus_per_task = 1 if cpus_per_task is None else cpus_per_task
+    gpus = 0 if gpus is None else gpus
     if not isinstance(cfg.max_concurrent_jobs, int) or cfg.max_concurrent_jobs < 1:
         raise SlurmPolicyError("Invalid server max_concurrent_jobs configuration")
     for name in ("max_nodes", "max_cpus", "max_memory_mb", "max_gpus"):
@@ -107,25 +111,28 @@ def validate_job_request(
         raise SlurmPolicyError("active_jobs must be a non-negative integer", requested=repr(active_jobs))
 
     # Partition -------------------------------------------------------------
+    # The agent never supplies or sees the partition: the server picks it
+    # from the configured allow-list.  (An optional partition hint from a
+    # user-owned .sh script is validated separately in the Slurm manager.)
     if not cfg.allowed_partitions:
         raise SlurmPolicyError(
             "No Slurm partitions are allowed by the server configuration. "
             "Ask the administrator to set slurm.allowed_partitions (fail-closed default)."
         )
-    effective_partition = partition or (cfg.allowed_partitions[0] if len(cfg.allowed_partitions) == 1 else None)
-    if effective_partition is None:
-        raise SlurmPolicyError(
-            "A partition must be specified",
-            scope="allowed partitions: " + ", ".join(cfg.allowed_partitions),
-        )
-    if not isinstance(effective_partition, str) or not effective_partition or len(effective_partition) > 128 or any(ch in effective_partition for ch in "\x00\r\n"):
-        raise SlurmPolicyError("Partition must be a simple name", requested=repr(effective_partition))
-    if effective_partition not in cfg.allowed_partitions:
-        raise SlurmPolicyError(
-            f"Partition {effective_partition!r} is not allowed",
-            requested=effective_partition,
-            scope="allowed partitions: " + ", ".join(cfg.allowed_partitions),
-        )
+    if partition is not None:
+        # internal hint (from a .sh script or a single-partition config)
+        if not isinstance(partition, str) or not partition or len(partition) > 128 or any(ch in partition for ch in "\x00\r\n"):
+            raise SlurmPolicyError("Partition must be a simple name", requested="(redacted)")
+        if partition not in cfg.allowed_partitions:
+            raise SlurmPolicyError(
+                "Requested partition is not allowed by the server policy",
+                requested="(redacted)",
+            )
+        effective_partition = partition
+    else:
+        effective_partition = cfg.allowed_partitions[0]
+    if not isinstance(effective_partition, str) or not effective_partition:
+        raise SlurmPolicyError("Server has no usable partition configured")
 
     # Concurrency -----------------------------------------------------------
     if active_jobs >= cfg.max_concurrent_jobs:

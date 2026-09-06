@@ -26,6 +26,7 @@ class FakeSsh:
         self.submitted_scripts: list[str] = []
         self.next_job_id = "424242"
         self.outputs: dict[str, str] = {}
+        self.scripts: dict[str, str] = {}
 
     async def realpath(self, path):
         return path
@@ -53,6 +54,11 @@ class FakeSsh:
         if argv[0] == "scancel":
             self.states[argv[-1]] = "CANCELLED"
             return RemoteResult(stdout=b"", stderr=b"", exit_code=0)
+        if argv[0] == "cat" and "--" in argv:
+            path = argv[-1]
+            data = self.scripts.get(path, "")
+            code = 0 if path in self.scripts else 1
+            return RemoteResult(stdout=data.encode(), stderr=b"", exit_code=code)
         if argv[0] == "tail":
             path = argv[-1]
             data = self.outputs.get(path, "")
@@ -65,6 +71,12 @@ class FakeSsh:
         return RemoteResult(stdout=b"", stderr=b"", exit_code=0)
 
     async def run_raw(self, cmd, *, stdin_text=None, **kw):
+        import json, re as _re
+        if "tracked_jobs.json" in cmd and "HPCMCP_EOF" in cmd:
+            m = _re.search(r"HPCMCP_EOF'?\n(.*?)\nHPCMCP_EOF", cmd, _re.S)
+            if m:
+                self.register = json.loads(m.group(1))
+            return RemoteResult(stdout=b"", stderr=b"", exit_code=0)
         if "sbatch" in cmd:
             self.submitted_scripts.append(stdin_text or "")
             self.states[self.next_job_id] = "PENDING"
@@ -97,6 +109,67 @@ class TestSubmit:
         )
         assert res["working_directory"] == ROOT
         assert f"#SBATCH --chdir={ROOT}" in ssh.submitted_scripts[0]
+
+    async def test_submit_reads_sbatch_defaults_from_script(self):
+        """#SBATCH directives in a user .sh script become parameter defaults."""
+        ssh = FakeSsh()
+        mgr = SlurmManager(make_cfg(), ssh, JobTracker(make_cfg(), ssh))
+        script = f"{ROOT}/proj/run.sh"
+        ssh.scripts[script] = (
+            "#!/bin/bash\n"
+            "#SBATCH --partition=compute\n"
+            "#SBATCH --nodes=2\n"
+            "#SBATCH --cpus-per-task=16\n"
+            "#SBATCH --time=02:00:00\n"
+            "#SBATCH --mem=32G\n"
+            "#SBATCH --gres=gpu:2\n"
+            "echo running\n"
+        )
+        res = await mgr.submit(
+            job_name="t", working_directory=ROOT + "/proj",
+            command=script,
+        )
+        rendered = ssh.submitted_scripts[0]
+        assert "#SBATCH --partition=compute" in rendered
+        assert "#SBATCH --nodes=2" in rendered
+        assert "#SBATCH --cpus-per-task=16" in rendered
+        assert "#SBATCH --time=02:00:00" in rendered
+        assert "#SBATCH --mem=32768M" in rendered
+        assert "#SBATCH --gres=gpu:2" in rendered
+        assert "/proj/run.sh" in rendered
+
+    async def test_submit_explicit_args_override_script(self):
+        ssh = FakeSsh()
+        mgr = SlurmManager(make_cfg(), ssh, JobTracker(make_cfg(), ssh))
+        script = f"{ROOT}/proj/run.sh"
+        ssh.scripts[script] = (
+            "#!/bin/bash\n#SBATCH --cpus-per-task=2\n#SBATCH --time=00:10:00\n"
+        )
+        await mgr.submit(
+            job_name="t", working_directory=ROOT + "/proj",
+            command=script, cpus_per_task=8, time_limit="01:00:00",
+        )
+        rendered = ssh.submitted_scripts[0]
+        assert "#SBATCH --cpus-per-task=8" in rendered
+        assert "#SBATCH --time=01:00:00" in rendered
+
+    async def test_submit_script_bad_partition_denied(self):
+        ssh = FakeSsh()
+        mgr = SlurmManager(make_cfg(), ssh, JobTracker(make_cfg(), ssh))
+        script = f"{ROOT}/proj/run.sh"
+        ssh.scripts[script] = "#!/bin/bash\n#SBATCH --partition=gpu-long\n"
+        with pytest.raises(SlurmPolicyError):
+            await mgr.submit(job_name="t", working_directory=ROOT + "/proj", command=script)
+
+    async def test_submit_returns_no_partition(self):
+        """The partition name must never leak back to the agent."""
+        ssh = FakeSsh()
+        mgr = SlurmManager(make_cfg(), ssh, JobTracker(make_cfg(), ssh))
+        res = await mgr.submit(
+            job_name="t", working_directory=ROOT,
+            command=["julia", "t.jl"],
+        )
+        assert "partition" not in res
 
     async def test_submit_escape_cwd_denied(self):
         ssh = FakeSsh()

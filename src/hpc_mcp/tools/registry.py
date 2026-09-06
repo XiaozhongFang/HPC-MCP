@@ -137,10 +137,10 @@ def build_tools(
             {
                 "working_root": root,
                 "local_roots": cfg.local_roots,
-                "allowed_partitions": cfg.slurm.allowed_partitions,
                 "max_cpus": cfg.slurm.max_cpus,
                 "max_nodes": cfg.slurm.max_nodes,
                 "max_time": cfg.slurm.max_time,
+                "max_gpus": cfg.slurm.max_gpus,
             }
         )
         return info
@@ -373,13 +373,12 @@ def build_tools(
             job_name=_str_arg(args, "job_name", required=False) or "job",
             working_directory=_str_arg(args, "working_directory", required=False) or root,
             command=command,
-            partition=_str_arg(args, "partition", required=False),
-            nodes=_int_arg(args, "nodes", 1, minimum=1) or 1,
-            ntasks=_int_arg(args, "ntasks", 1, minimum=1) or 1,
-            cpus_per_task=_int_arg(args, "cpus_per_task", 1, minimum=1) or 1,
+            nodes=_int_arg(args, "nodes", minimum=1),
+            ntasks=_int_arg(args, "ntasks", minimum=1),
+            cpus_per_task=_int_arg(args, "cpus_per_task", minimum=1),
             memory=args.get("memory"),
             time_limit=_str_arg(args, "time_limit", required=False),
-            gpus=_int_arg(args, "gpus", 0, minimum=0) or 0,
+            gpus=_int_arg(args, "gpus", minimum=0),
             environment=args.get("environment"),
         )
 
@@ -394,12 +393,18 @@ def build_tools(
                 "submit the job here and poll hpc.slurm.status/hpc.slurm.output; "
                 "do NOT download source to the local machine and run it locally "
                 "unless the environment truly cannot be reached otherwise.\n"
-                "Defaults (from server config, overridable per call): "
-                "working_directory = the configured user root; partition = the "
-                "configured allowed partition (first one if several); "
-                f"allowed partitions: {', '.join(cfg.slurm.allowed_partitions) or '(none configured)'}; "
-                f"cpus_per_task=1, nodes=1, ntasks=1, gpus=0, max_time={cfg.slurm.max_time}. "
-                "Job stdout/stderr is captured under .hpc-mcp/jobs/<id>/."
+                "Parameter defaults come from the server configuration (the "
+                "partition, time limit and resource caps are configured by the "
+                "administrator and are not exposed) or, when 'command' is a "
+                "single .sh script path, from that script's #SBATCH directives "
+                "(e.g. --cpus-per-task, --time, --mem, --nodes, --ntasks). "
+                "Explicit arguments override script directives. The partition "
+                "itself is always chosen by the server from its configured "
+                "allow-list and cannot be requested or seen.\n"
+                "Default working_directory = the configured user root; "
+                "cpus_per_task/nodes/ntasks default to 1, gpus to 0, and the "
+                "time limit defaults to the configured maximum. Job stdout/err "
+                "is captured under .hpc-mcp/jobs/<id>/."
             ),
             schema={
                 "type": "object",
@@ -414,15 +419,14 @@ def build_tools(
                             {"type": "array", "items": {"type": "string"}},
                             {"type": "string"},
                         ],
-                        "description": "Program argv, e.g. ['julia','--project=.','test/runtests.jl']",
+                        "description": "Program argv, e.g. ['julia','--project=.','test/runtests.jl'], or a single path to a .sh job script whose #SBATCH directives provide defaults",
                     },
-                    "partition": _str("partition", f"Slurm partition (default: {cfg.slurm.allowed_partitions[0] if cfg.slurm.allowed_partitions else 'configured one'})"),
-                    "nodes": _int("nodes", "Node count (default 1)", 1),
-                    "ntasks": _int("ntasks", "Task count (default 1)", 1),
-                    "cpus_per_task": _int("cpus_per_task", "CPUs per task (default 1)", 1),
+                    "nodes": _int("nodes", "Node count (default 1)"),
+                    "ntasks": _int("ntasks", "Task count (default 1)"),
+                    "cpus_per_task": _int("cpus_per_task", "CPUs per task (default 1)"),
                     "memory": _str("memory", "Memory, e.g. '16G' (default: none)"),
-                    "time_limit": _str("time_limit", f"Wall limit, e.g. '00:30:00' (default {cfg.slurm.max_time})"),
-                    "gpus": _int("gpus", "GPU count (default 0)", 0),
+                    "time_limit": _str("time_limit", "Wall limit, e.g. '00:30:00' (default: configured maximum)"),
+                    "gpus": _int("gpus", "GPU count (default 0)"),
                     "environment": {"type": "object", "additionalProperties": {"type": "string"}},
                 },
                 "required": ["command"],

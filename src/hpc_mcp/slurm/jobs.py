@@ -83,7 +83,9 @@ class JobTracker:
             f"test ! -e {q_tmp}; cat > {q_tmp} <<'HPCMCP_EOF'\n{payload}\nHPCMCP_EOF\n"
             f"test ! -L {q_tmp}; mv -f -- {q_tmp} {q}"
         )
-        await self._ssh.run(["sh", "-c", command], check=True)
+        # run_raw (not run): the heredoc command legitimately contains
+        # newlines, and this string is built entirely from quoted paths.
+        await self._ssh.run_raw(command, check=True)
 
     async def register(self, job_id: str, *, job_name: str, project_root: str, job_dir: str) -> None:
         if not job_id.isdigit() or len(job_id) > 20:

@@ -39,12 +39,12 @@ class SlurmManager:
         working_directory: str,
         command: list[str] | str,
         partition: str | None = None,
-        nodes: int = 1,
-        ntasks: int = 1,
-        cpus_per_task: int = 1,
+        nodes: int | None = None,
+        ntasks: int | None = None,
+        cpus_per_task: int | None = None,
         memory: str | int | None = None,
         time_limit: str | None = None,
-        gpus: int = 0,
+        gpus: int | None = None,
         environment: dict[str, str] | None = None,
     ) -> dict:
         async with self._submit_lock:
@@ -69,12 +69,12 @@ class SlurmManager:
         working_directory: str,
         command: list[str] | str,
         partition: str | None = None,
-        nodes: int = 1,
-        ntasks: int = 1,
-        cpus_per_task: int = 1,
+        nodes: int | None = None,
+        ntasks: int | None = None,
+        cpus_per_task: int | None = None,
         memory: str | int | None = None,
         time_limit: str | None = None,
-        gpus: int = 0,
+        gpus: int | None = None,
         environment: dict[str, str] | None = None,
     ) -> dict:
         cmd_argv = self._validate_command(command)
@@ -92,6 +92,17 @@ class SlurmManager:
                 requested=working_directory,
                 scope=self._cfg.root,
             )
+
+        # Defaults come from the job script's #SBATCH directives when the
+        # command is a .sh script; explicit agent args win over them.
+        script_defaults = await self._read_sbatch_defaults(real_cwd, cmd_argv)
+        partition = partition if partition is not None else script_defaults.get("partition")
+        nodes = nodes if nodes is not None else int(script_defaults.get("nodes") or 1)
+        ntasks = ntasks if ntasks is not None else int(script_defaults.get("ntasks") or 1)
+        cpus_per_task = cpus_per_task if cpus_per_task is not None else int(script_defaults.get("cpus_per_task") or 1)
+        memory = memory if memory is not None else script_defaults.get("memory")
+        time_limit = time_limit if time_limit is not None else script_defaults.get("time_limit")
+        gpus = gpus if gpus is not None else int(script_defaults.get("gpus") or 0)
 
         # concurrency check against currently active tracked jobs
         states = await self._queue_states()
@@ -155,7 +166,6 @@ class SlurmManager:
         return {
             "job_id": job_id,
             "job_name": safe_name,
-            "partition": eff["partition"],
             "working_directory": real_cwd,
             "job_dir": job_dir,
             "stdout_path": f"{job_dir}/stdout.log",
@@ -194,6 +204,56 @@ class SlurmManager:
         if total > 128 * 1024:
             raise SlurmPolicyError("command argv exceeds the script size limit")
         return result
+
+    #: #SBATCH directives that map to submit parameters
+    _SBATCH_PARAMS = {
+        "--partition": "partition",
+        "--nodes": "nodes",
+        "--ntasks": "ntasks",
+        "--cpus-per-task": "cpus_per_task",
+        "--mem": "memory",
+        "--time": "time_limit",
+        "--gres=gpu": "gpus",
+    }
+
+    async def _read_sbatch_defaults(self, working_directory: str, cmd_argv: list[str]) -> dict:
+        """Parse #SBATCH directives from a user .sh script to serve as defaults.
+
+        Only used when ``command`` is a single path to a ``.sh`` script inside
+        the user root.  Values from the agent's explicit arguments win over
+        these; the partition hint still has to pass the allow-list policy.
+        """
+        if len(cmd_argv) != 1 or not cmd_argv[0].endswith(".sh"):
+            return {}
+        from ..filesystem.service import FileService
+
+        fs = FileService(self._cfg, self._ssh)
+        script_path = await fs.resolve_existing(cmd_argv[0])
+        if not script_path.startswith(self._cfg.root + "/") and script_path != self._cfg.root:
+            raise SlurmPolicyError("Job script must be inside the configured user root")
+        res = await self._ssh.run(["cat", "--", script_path], check=False, max_output=256 * 1024)
+        if res.exit_code != 0:
+            raise SlurmPolicyError(f"Could not read job script {cmd_argv[0]!r}")
+        defaults: dict = {}
+        for line in res.stdout_text.splitlines()[:200]:
+            line = line.strip()
+            if not line.startswith("#SBATCH"):
+                continue
+            directive = line[len("#SBATCH"):].strip()
+            # support "--flag=value", "--flag value" and "--gres=gpu:N" forms
+            if directive.startswith("--gres="):
+                # --gres=gpu:N (or --gres=gpu:N:...) -> gpus=N
+                gres_spec = directive[len("--gres="):]
+                defaults["gpus"] = gres_spec.split(":")[1] if ":" in gres_spec else gres_spec
+                continue
+            flag, value = directive.split("=", 1) if "=" in directive else directive.split(" ", 1)
+            flag = flag.strip()
+            value = value.strip()
+            if not flag or not value:
+                continue
+            if flag in ("--partition", "--nodes", "--ntasks", "--cpus-per-task", "--mem", "--time"):
+                defaults[self._SBATCH_PARAMS[flag]] = value
+        return defaults
 
     @staticmethod
     def _validate_environment(environment: dict[str, str] | None) -> dict[str, str]:
