@@ -143,6 +143,14 @@ Host my-hpc
 
 Agent 永远不会接触私钥内容。
 
+**必须配置免密登录**（hpc-mcp 强制 `BatchMode=yes`，不弹密码）。配置前先用
+BatchMode 确认免密已就绪，否则所有工具调用都会报 `Permission denied`：
+
+```bash
+ssh -o BatchMode=yes my-hpc "echo OK"   # 能直接返回 OK 才代表免密可用
+ssh-copy-id my-hpc                      # 若上面失败，先配免密（要一次密码）
+```
+
 默认 `StrictHostKeyChecking=yes`：首次连接请先手动 `ssh my-hpc` 确认主机指纹并写入 `known_hosts`；如确需首次自动登记，可在配置中设 `ssh.strict_host_key_checking: accept-new`。
 
 ### 连通性自检

@@ -87,6 +87,29 @@ python3 -m pip install --user .
   → 系统 `~/.local` 里有别的包冲突（torch/httpcore 等）。**不影响 hpc-mcp 运行**，
   但说明该环境已混装，建议换虚拟环境。
 
+### ⚠️ 安装后第一步：确认 SSH 免密登录已配置
+
+**hpc-mcp 强制使用免密登录（BatchMode=yes，禁止密码交互）**。如果没配免密，
+server 一启动工具调用就会全部失败（`Permission denied`），而且**不会弹出密码提示**。
+所以装完包、连集群之前，**务必先手动确认免密可用**：
+
+```bash
+# 关键：加 -o BatchMode=yes 模拟 hpc-mcp 的连接方式，
+# 如果这行能直接返回 OK（不询问密码），说明免密已就绪：
+ssh -o BatchMode=yes -o ConnectTimeout=10 alice@192.168.10.10 "echo OK"
+```
+
+- 能打印 `OK` → 免密已配置，直接继续第 3 步。
+- 报 `Permission denied (publickey...)` → **还没免密**，先配：
+  ```bash
+  ssh-copy-id alice@192.168.10.10   # 会要一次密码，之后就不用
+  ```
+  然后重跑上面的 BatchMode 确认命令。
+- 报 `Connection timed out` → 网络不通，先连 VPN / 配跳板机（见第 2 节）。
+
+> 用 `~/.ssh/config` 管理连接时，确认命令里的主机换成 `Host` 别名：
+> `ssh -o BatchMode=yes my-hpc "echo OK"`
+
 ---
 
 ## 2. 准备 SSH：先确保“裸 ssh 能免密登上”
