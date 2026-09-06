@@ -174,8 +174,9 @@ def _env_int(name: str, environ: dict[str, str] | None = None) -> int | None:
         return None
     try:
         return int(v)
-    except ValueError as exc:
-        raise ConfigError(f"Environment variable {ENV_PREFIX}{name} must be an integer, got {v!r}") from exc
+    except ValueError:
+        # allow simple arithmetic expressions like "4*16" in env vars too
+        return _eval_int_expr(v, f"HPC_MCP_{name}")
 
 
 def _coalesce(*values: Any, default: Any = None) -> Any:
@@ -198,9 +199,81 @@ def _mapping(data: dict[str, Any], name: str) -> dict[str, Any]:
 
 
 def _bounded_int(value: Any, name: str, *, minimum: int = 1, maximum: int = 2**31 - 1) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not (minimum <= value <= maximum):
+    if isinstance(value, bool):
+        raise ConfigError(f"{name} must be an integer between {minimum} and {maximum}, got {value!r}")
+    if isinstance(value, str):
+        value = _eval_int_expr(value, name)
+    if not isinstance(value, int) or not (minimum <= value <= maximum):
         raise ConfigError(f"{name} must be an integer between {minimum} and {maximum}, got {value!r}")
     return value
+
+
+#: Arithmetic expressions (e.g. "4*16", "256/2", "8*(2+1)") are allowed in
+#: numeric config fields so administrators can express resource limits in
+#: terms of machine properties (cores per node, etc.).  Only + - * / ( )
+#: and integers are accepted; everything else is rejected.
+_ARITH_RE = re.compile(r"^[\d\s+\-*/()]+$")
+
+
+def _eval_int_expr(value: str, name: str) -> int:
+    """Safely evaluate a simple integer arithmetic expression from config."""
+    expr = value.strip()
+    if not expr or not _ARITH_RE.match(expr):
+        raise ConfigError(f"{name} must be an integer or a simple arithmetic expression (e.g. '4*16'), got {value!r}")
+    try:
+        result = _arith_eval(expr)
+    except Exception as exc:
+        raise ConfigError(f"{name}: could not evaluate expression {value!r}: {exc}") from exc
+    if isinstance(result, bool) or not isinstance(result, int) or result <= 0:
+        raise ConfigError(f"{name} expression must evaluate to a positive integer, got {value!r}")
+    return result
+
+
+def _arith_eval(expr: str) -> int:
+    """Evaluate an expression containing only ints and + - * / ( ) using an
+    operator-precedence shunting-yard (no eval, no names, no functions)."""
+    import ast
+
+    tree = ast.parse(expr, mode="eval")
+    allowed = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.USub, ast.UAdd)
+    for node in ast.walk(tree):
+        if not isinstance(node, allowed):
+            raise ValueError("unsupported syntax")
+        if isinstance(node, ast.Constant) and not isinstance(node.value, int):
+            raise ValueError("only integers allowed")
+        if isinstance(node, ast.Div) or isinstance(node, ast.FloorDiv):
+            # keep it simple: integer division with // semantics
+            pass
+    import operator
+
+    ops = {
+        ast.Add: operator.add,
+        ast.Sub: operator.sub,
+        ast.Mult: operator.mul,
+        ast.Div: operator.floordiv,
+        ast.FloorDiv: operator.floordiv,
+        ast.USub: operator.neg,
+        ast.UAdd: operator.pos,
+    }
+
+    def _eval(node: ast.AST) -> int:
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.UnaryOp):
+            return ops[type(node.op)](_eval(node.operand))
+        if isinstance(node, ast.BinOp):
+            left = _eval(node.left)
+            right = _eval(node.right)
+            op = ops[type(node.op)]
+            if isinstance(node.op, (ast.Div, ast.FloorDiv)) and right == 0:
+                raise ValueError("division by zero")
+            return op(left, right)
+        raise ValueError("unsupported syntax")
+
+    result = _eval(tree.body)
+    if not isinstance(result, int):
+        raise ValueError("expression must evaluate to an integer")
+    return result
 
 
 def _safe_text(value: Any, name: str) -> str:

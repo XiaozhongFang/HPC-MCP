@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from hpc_mcp.config import build_config
+from hpc_mcp.config import _eval_int_expr, build_config
 from hpc_mcp.errors import ConfigError
 
 
@@ -216,3 +216,30 @@ class TestBuildConfig:
         _base_env(monkeypatch)
         with pytest.raises(ConfigError, match="filesystem root"):
             build_config(NS(host="h", root="/"))
+
+
+class TestArithExpressions:
+    def test_max_cpus_expression(self, monkeypatch, tmp_path):
+        _base_env(monkeypatch)
+        d = tmp_path / "da"
+        d.mkdir()
+        p = tmp_path / "c.yaml"
+        p.write_text(f"host: h\nroot: /home/u/me\nslurm:\n  max_cpus: '4*16'\n  max_nodes: '64/8'\n  max_memory_mb: '8*(2+1)'\n")
+        cfg = build_config(NS(config=str(p)))
+        assert cfg.slurm.max_cpus == 64
+        assert cfg.slurm.max_nodes == 8
+        assert cfg.slurm.max_memory_mb == 24
+
+    def test_env_int_expression(self, monkeypatch):
+        _base_env(monkeypatch)
+        monkeypatch.setenv("HPC_MCP_HOST", "h")
+        monkeypatch.setenv("HPC_MCP_ROOT", "/home/u/me")
+        monkeypatch.setenv("HPC_MCP_MAX_CPUS", "4*16")
+        cfg = build_config(NS())
+        assert cfg.slurm.max_cpus == 64
+
+    @pytest.mark.parametrize("expr", ["__import__('os')", "os.system('x')", "1;2", "1+", "**2", "2**3"])
+    def test_expression_injection_denied(self, monkeypatch, expr):
+        _base_env(monkeypatch)
+        with pytest.raises(ConfigError):
+            _eval_int_expr(expr, "max_cpus")

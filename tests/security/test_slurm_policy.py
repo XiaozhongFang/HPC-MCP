@@ -123,6 +123,8 @@ class TestTimeParsing:
             ("1-00:00:00", 86400),
             ("2-12:30:00", 2 * 86400 + 12 * 3600 + 1800),
             ("30", 1800),  # bare minutes
+            ("2-24:00:00", 3 * 86400),  # day-overflow form Slurm accepts
+            ("2-23:59:59", 3 * 86400 - 1),
         ],
     )
     def test_parse_ok(self, text: str, seconds: int) -> None:
@@ -133,9 +135,15 @@ class TestTimeParsing:
         with pytest.raises(SlurmPolicyError):
             parse_time_limit(bad)
 
+    def test_bare_hours_over_24_denied(self) -> None:
+        # without a day prefix, hours must stay <= 24
+        with pytest.raises(SlurmPolicyError):
+            parse_time_limit("25:00:00")
+
     def test_roundtrip(self) -> None:
         assert format_time_limit(86400) == "1-00:00:00"
         assert format_time_limit(1800) == "00:30:00"
+        assert format_time_limit(3 * 86400) == "3-00:00:00"
 
 
 class TestMemoryParsing:

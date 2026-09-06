@@ -19,8 +19,9 @@ _TIME_RE = re.compile(r"^(?:(?P<days>\d+)-)?(?P<body>\d+(?::\d+){1,2})$|^(?P<min
 def parse_time_limit(value: str) -> int:
     """Parse a Slurm time limit into seconds.
 
-    Accepts ``HH:MM:SS``, ``D-HH:MM:SS``, ``MM:SS``, ``D-HH:MM`` and bare
-    minutes.  Raises :class:`SlurmPolicyError` on unparsable input.
+    Accepts ``HH:MM:SS``, ``D-HH:MM:SS``, ``MM:SS``, ``D-HH:MM``, bare
+    minutes, and day-overflow forms like ``2-24:00:00`` (== 3 days), which
+    Slurm accepts.  Raises :class:`SlurmPolicyError` on unparsable input.
     """
     if not isinstance(value, str) or not value.strip():
         raise SlurmPolicyError("Time limit must be a non-empty string", requested=repr(value))
@@ -30,25 +31,36 @@ def parse_time_limit(value: str) -> int:
         raise SlurmPolicyError(
             "Could not parse Slurm time limit",
             requested=v,
-            use_instead="Formats like HH:MM:SS, D-HH:MM:SS or bare minutes",
+            use_instead="Formats like HH:MM:SS, D-HH:MM:SS, D-24:00:00 or bare minutes",
         )
     if m.group("mins_only") is not None:
         return int(m.group("mins_only")) * 60
     days = int(m.group("days") or 0)
     fields = [int(part) for part in m.group("body").split(":")]
-    if days and len(fields) == 2:
-        hours, minutes = fields
-        seconds = 0
-    elif len(fields) == 2:
-        hours = 0
-        minutes, seconds = fields
+    if len(fields) == 2:
+        if days:
+            # D-HH:MM
+            hours, minutes = fields
+            seconds = 0
+        else:
+            # MM:SS
+            hours = 0
+            minutes, seconds = fields
     elif len(fields) == 3:
         hours, minutes, seconds = fields
     else:  # defensive: regex already restricts this
         raise SlurmPolicyError("Could not parse Slurm time limit", requested=v)
-    if minutes > 59 or seconds > 59 or hours > 24 or (hours == 24 and (minutes or seconds or days)):
-        raise SlurmPolicyError("Time limit has invalid hour/minute/second fields", requested=v)
-    return days * 86400 + hours * 3600 + minutes * 60 + seconds
+    # Field sanity: minutes/seconds must be < 60.  Hours may exceed 24 only
+    # when a day prefix is present (Slurm allows D-24:00:00 == D+1 days);
+    # a bare HH:MM:SS must keep hours <= 24 (24:00:00 == 1 day).
+    if minutes > 59 or seconds > 59:
+        raise SlurmPolicyError("Time limit has invalid minute/second fields", requested=v)
+    if not days and hours > 24:
+        raise SlurmPolicyError("Time limit has invalid hour field", requested=v)
+    total = days * 86400 + hours * 3600 + minutes * 60 + seconds
+    if total <= 0:
+        raise SlurmPolicyError("Time limit must be positive", requested=v)
+    return total
 
 
 def format_time_limit(seconds: int) -> str:

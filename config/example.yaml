@@ -26,9 +26,11 @@ slurm:
   allowed_partitions:
     - compute
   max_nodes: 2
+  # 数字字段支持简单算术表达式（+ - * / 和括号），如 "4*16"、"128/4"
   max_cpus: 64
   max_memory_mb: 262144      # 256 GiB
   max_gpus: 4
+  # Slurm 时长格式：HH:MM:SS、D-HH:MM:SS；天数可溢出如 "2-24:00:00"（=3 天）
   max_time: "24:00:00"
   max_concurrent_jobs: 20
 
