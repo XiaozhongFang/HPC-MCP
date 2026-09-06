@@ -22,7 +22,9 @@ from ..security import limits
 from ..security.path_policy import check_canonical_parent, validate_path
 from ..ssh.manager import SshManager
 
-_CHUNK = 512 * 1024  # base64 chunk size for read/write round trips
+_CHUNK = 16 * 1024  # base64 chunk size for write round trips.  Kept small so
+# the remote command line stays far below OS argv limits (Windows OpenSSH
+# chokes around 32 KiB; even Linux has ARG_MAX constraints).
 
 
 class FileService:
@@ -114,11 +116,12 @@ class FileService:
             raise PathSandboxError("offset must be a non-negative integer", requested=str(offset))
         cap = self._bounded_cap(max_bytes, self._cfg.files.max_read_bytes, "max_bytes")
 
-        # size check first
+        # Report the full size so the agent can page, but do NOT refuse to
+        # read just because the file is larger than cap: each call returns at
+        # most cap bytes and the result tells the agent how to continue via
+        # end_of_file / next_offset (chunked reading).
         st = await self._ssh.run(["stat", "-c", "%s", "--", real], check=True)
         size = int(st.stdout_text.strip() or "0")
-        if offset == 0:
-            limits.check_read_size(size, cap)
 
         fetch = cap + 1
         # dd with base64 to transfer raw bytes safely over the exec channel;
@@ -158,23 +161,22 @@ class FileService:
         previous_size = int(st.stdout_text.strip()) if existed else 0
 
         op = ">>" if append else ">"
-        # write in base64 chunks through stdin-free exec: embed in argv is
-        # unsafe for large payloads, so decode remotely from base64 heredoc.
-        total = 0
-        first = True
-        for i in range(0, len(data), _CHUNK):
-            chunk = data[i : i + _CHUNK]
-            b64 = base64.b64encode(chunk).decode()
-            redirect = op if first else ">>"
-            argv = [
-                "sh", "-c",
-                f"printf %s {_q(b64)} | base64 -d {redirect} {_q(real)}",
-            ]
-            await self._ssh.run(argv, check=True, max_output=1024)
-            total += len(chunk)
-            first = False
-        if not data:  # empty file
-            await self._ssh.run(["sh", "-c", f": {op} {_q(real)}"], check=True)
+        # Write the whole payload in ONE round trip via stdin: the base64
+        # text is piped to the remote `base64 -d` through the ssh channel
+        # (not argv), so it is not limited by OS command-line length and
+        # works on Windows OpenSSH too.  The remote command line itself
+        # carries only the (quoted) path.
+        b64 = base64.b64encode(data).decode()
+        if data:
+            remote = f"base64 -d {op} {_q(real)}"
+        else:  # empty file
+            remote = f": {op} {_q(real)}"
+        res = await self._ssh.run_raw(
+            remote, stdin_text=b64, check=True, max_output=4096
+        )
+        if res.exit_code != 0:
+            raise RemoteCommandError(f"Remote write failed: {res.stderr_text.strip()[:400]}", exit_code=res.exit_code)
+        total = len(data)
 
         if append:
             change = "appended"

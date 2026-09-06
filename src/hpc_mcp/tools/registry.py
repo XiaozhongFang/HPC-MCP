@@ -201,10 +201,13 @@ def build_tools(
             name="hpc.files.read",
             description=(
                 f"Read a remote text file directly (no download needed) inside {root}. "
-                "Reads are size-capped; for large files pass offset/max_bytes to page "
-                "through. The result reports size, offset, bytes, end_of_file and "
-                "next_offset so you can iterate: read -> if end_of_file is false, "
-                "call again with offset=next_offset."
+                "Each call returns at most max_bytes (server-capped). Files larger "
+                "than the cap are NOT refused: read the first chunk (offset=0), then "
+                "if the result's end_of_file is false, keep calling with "
+                "offset=next_offset until end_of_file is true. The result reports "
+                "size (full file), offset, bytes, end_of_file and next_offset for "
+                "this iteration. Example for a large log: read(offset=0, max_bytes=20000) "
+                "-> offset=20000 -> offset=40000 ... until end_of_file=true."
             ),
             schema={
                 "type": "object",

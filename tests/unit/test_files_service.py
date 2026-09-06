@@ -41,11 +41,13 @@ class FakeSsh:
         if argv[0] == "stat" and "%F" in argv[2]:
             return RemoteResult(stdout=b"regular file|10|644|u|g|1700000000", stderr=b"", exit_code=0)
         if argv[0] == "sh" and "base64" in argv[-1]:
-            # parse the dd command: extract skip= and count=, slice accordingly
+            # parse the dd command: extract the input path, skip= and count=
             import re as _re
 
             cmd = argv[-1]
-            data = self.file_data.get(ROOT + "/project/f.txt", b"")
+            m_path = _re.search(r"dd if=['\"]?([^ '\"]+)", cmd)
+            path = m_path.group(1) if m_path else ROOT + "/project/f.txt"
+            data = self.file_data.get(path, b"")
             m_skip = _re.search(r"skip=(\d+)", cmd)
             m_count = _re.search(r"count=(\d+)", cmd)
             skip = int(m_skip.group(1)) if m_skip else 0
@@ -108,13 +110,39 @@ class TestReadSandbox:
         with pytest.raises(PathSandboxError):
             await fs.read_file(ROOT + "/link/passwd")
 
-    async def test_read_too_large_denied(self):
+    async def test_read_large_file_first_chunk_ok(self):
+        """A file larger than the cap is not refused: the first chunk is
+        returned and the agent is told how to continue (end_of_file=false)."""
         ssh = FakeSsh()
         fs = FileService(make_cfg(), ssh)
         big = ROOT + "/big.log"
-        ssh.file_sizes[big] = 100 * 1024 * 1024
-        with pytest.raises(PolicyDenied, match="read limit"):
-            await fs.read_file(big)
+        data = b"x" * 100 * 1024
+        ssh.file_sizes[big] = len(data)
+        ssh.file_data[big] = data
+        out = await fs.read_file(big, max_bytes=1000)
+        assert out["bytes"] == 1000
+        assert out["end_of_file"] is False
+        assert out["next_offset"] == 1000
+        assert out["size"] == len(data)
+
+    async def test_read_large_file_pages_to_end(self):
+        ssh = FakeSsh()
+        fs = FileService(make_cfg(), ssh)
+        big = ROOT + "/big.log"
+        data = b"abcdefghij" * 300  # 3000 bytes
+        ssh.file_sizes[big] = len(data)
+        ssh.file_data[big] = data
+        # 分块读完全部
+        offset = 0
+        chunks = []
+        while True:
+            out = await fs.read_file(big, offset=offset, max_bytes=1000)
+            chunks.append(out["content"])
+            if out["end_of_file"]:
+                break
+            offset = out["next_offset"]
+        assert "".join(chunks) == data.decode()
+        assert len(chunks) == 3
 
 
 @pytest.mark.asyncio

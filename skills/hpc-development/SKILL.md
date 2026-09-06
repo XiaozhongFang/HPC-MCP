@@ -21,6 +21,7 @@ description: 在远程 HPC 集群上安全地进行科研计算开发（Julia/MO
 
 1. **了解环境**：`hpc.info` 查看 working_root、local_roots、可用分区与资源上限（注意：SSH host/user 不暴露，不要尝试获取或绕过 MCP 直连）。
 2. **查看项目**：`hpc.files.list` / `hpc.files.read` 直接读远程代码，`hpc.shell.run_safe` 做 `git diff`、`ls` 等轻量检查。
+   - **大文件分块读取**：`hpc.files.read` 每次最多返回 `max_bytes`（服务端限制），但**不会拒绝读取大文件**。读大文件用循环：先 `read(offset=0)`，若返回的 `end_of_file` 为 `false`，继续用返回的 `next_offset` 作为下次的 `offset`，直到 `end_of_file` 为 `true`。不要因文件大而下载到本地——分块读即可。
 3. **远程编辑**：`hpc.files.write`（或先 `read` 再 `write` 修改片段）直接在远程改代码；小改动不需要下载。
 4. **远程提交计算**：需要编译/测试/模拟时走 `hpc.slurm.submit`：
 
