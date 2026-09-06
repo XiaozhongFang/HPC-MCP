@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# hpc-mcp-run: portable launcher for the hpc-mcp MCP server.
+#
+# Purpose
+#   Client MCP configs (Codex/Reasonix/.mcp.json) should point at THIS
+#   script instead of a machine-specific absolute path, so the same
+#   repository works on any machine after hpc-mcp is installed.
+#
+# Resolution order for the hpc-mcp executable:
+#   1. $HPC_MCP_BIN if set (explicit override)
+#   2. `hpc-mcp` on PATH (e.g. an activated conda/venv)
+#   3. Common install locations:
+#        $HOME/anaconda3/envs/hpc-mcp/bin/hpc-mcp
+#        $HOME/venvs/hpc-mcp/bin/hpc-mcp
+#        $HOME/.local/bin/hpc-mcp
+#   4. Otherwise print a clear error (and exit non-zero) instead of
+#      silently failing inside the MCP client.
+#
+# All HPC_MCP_* env vars (host/root/partitions/...) are passed through
+# untouched; the user provides them via their shell profile or the MCP
+# client config's env block.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+find_hpc_mcp() {
+    if [[ -n "${HPC_MCP_BIN:-}" && -x "${HPC_MCP_BIN}" ]]; then
+        printf '%s\n' "${HPC_MCP_BIN}"
+        return 0
+    fi
+    if command -v hpc-mcp >/dev/null 2>&1; then
+        command -v hpc-mcp
+        return 0
+    fi
+    for candidate in \
+        "${HOME}/anaconda3/envs/hpc-mcp/bin/hpc-mcp" \
+        "${HOME}/venvs/hpc-mcp/bin/hpc-mcp" \
+        "${HOME}/.local/bin/hpc-mcp" \
+        "${REPO_ROOT}/.venv/bin/hpc-mcp"; do
+        if [[ -x "${candidate}" ]]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+BIN="$(find_hpc_mcp)" || {
+    echo "hpc-mcp-run: could not find the hpc-mcp executable." >&2
+    echo "  Install it in one of these locations:" >&2
+    echo "    - anywhere on PATH (conda/venv activated)" >&2
+    echo "    - \$HOME/anaconda3/envs/hpc-mcp/bin/hpc-mcp" >&2
+    echo "    - \$HOME/venvs/hpc-mcp/bin/hpc-mcp" >&2
+    echo "    - \$HOME/.local/bin/hpc-mcp" >&2
+    echo "  or set HPC_MCP_BIN to its absolute path." >&2
+    exit 127
+}
+
+exec "${BIN}" "$@"

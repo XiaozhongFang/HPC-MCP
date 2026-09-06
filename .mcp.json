@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.mcp.dev/config.json",
+  "mcpServers": {
+    "hpc": {
+      "command": "./scripts/hpc-mcp-run",
+      "env": {
+        "HPC_MCP_HOST": "${HPC_MCP_HOST}",
+        "HPC_MCP_USER": "${HPC_MCP_USER}",
+        "HPC_MCP_ROOT": "${HPC_MCP_ROOT}",
+        "HPC_MCP_ALLOWED_PARTITIONS": "${HPC_MCP_ALLOWED_PARTITIONS}",
+        "HPC_MCP_SSH_BIN": "${HPC_MCP_SSH_BIN}",
+        "HPC_MCP_SFTP_BIN": "${HPC_MCP_SFTP_BIN}",
+        "HPC_MCP_LOCAL_ROOTS": "${HPC_MCP_LOCAL_ROOTS}"
+      }
+    }
+  }
+}

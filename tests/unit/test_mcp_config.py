@@ -1,6 +1,7 @@
 """mcp_config (hpc-mcp mcp-add) tests: idempotent, non-destructive writes."""
 
 import pytest
+from pathlib import Path
 
 from hpc_mcp.config import Config, SshConfig
 from hpc_mcp.mcp_config import (
@@ -17,6 +18,28 @@ def make_cfg() -> Config:
         ssh=SshConfig(host="my-hpc", user="alice", port=22),
         local_roots=["/home/alice", "/tmp"],
     )
+
+
+class TestResolveSelf:
+    def test_prefers_repo_launcher(self, monkeypatch):
+        from hpc_mcp.mcp_config import _resolve_self
+
+        # repo root = parents[2] of this test file (tests/unit/test_mcp_config.py)
+        repo_root = Path(__file__).resolve().parents[2]
+        monkeypatch.chdir(repo_root)
+        resolved = _resolve_self()
+        assert resolved.endswith("scripts/hpc-mcp-run")
+        assert Path(resolved).exists()
+
+    def test_fallback_which(self, monkeypatch):
+        from hpc_mcp.mcp_config import _resolve_self
+
+        # chdir to a dir without the launcher, PATH without hpc-mcp
+        monkeypatch.chdir("/tmp")
+        monkeypatch.setenv("PATH", "/usr/bin:/bin")
+        resolved = _resolve_self()
+        # should still return something usable (not raise)
+        assert resolved
 
 
 class TestConfigEnv:

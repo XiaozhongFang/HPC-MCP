@@ -33,11 +33,30 @@ _REASONIX_PATH = Path("~/.reasonix/config.toml").expanduser()
 
 
 def _resolve_self() -> str:
-    """Absolute path to the real hpc-mcp entry executable.
+    """Command the MCP client should launch.
 
-    Prefers the installed console script found on PATH (which points into
-    the active conda/venv), then sys.argv[0]; falls back to a plain name.
+    Prefers the repository-local portable launcher ``scripts/hpc-mcp-run``
+    (absolute path), so the client config does NOT depend on where hpc-mcp
+    is installed (conda/venv) on this machine.  The launcher finds the real
+    executable itself.
+
+    The launcher is located by walking up from the current directory (so
+    ``hpc-mcp mcp-add`` works from anywhere inside the repo even when the
+    package is installed from PyPI/conda), then by the source tree of this
+    file.  Falls back to the installed console script path.
     """
+    candidates: list[Path] = []
+    # walk up from cwd looking for scripts/hpc-mcp-run
+    cwd = Path.cwd().resolve()
+    for parent in (cwd, *cwd.parents):
+        candidate = parent / "scripts" / "hpc-mcp-run"
+        if candidate.exists():
+            return str(candidate)
+    # source tree: src/hpc_mcp/mcp_config.py -> repo root
+    here = Path(__file__).resolve()
+    launcher = here.parents[2] / "scripts" / "hpc-mcp-run"
+    if launcher.exists():
+        return str(launcher)
     found = shutil.which("hpc-mcp")
     if found:
         return str(Path(found).resolve())

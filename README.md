@@ -164,11 +164,13 @@ hpc-mcp --host my-hpc --root /home/shared_account/alice --check
 ### 推荐：一条命令自动注册（`hpc-mcp mcp-add`）
 
 安装好之后，用 `mcp-add` 自动把 hpc-mcp 注册进 Codex 和 Reasonix 的配置。
-它会写入 **hpc-mcp 可执行文件的绝对路径**（自动检测当前 conda/venv 里的
-入口），因此**不需要**在启动 codex/reasonix 的 shell 里激活该环境：
+它写入的是**可移植的启动脚本路径**（`<repo>/scripts/hpc-mcp-run`），该脚本
+自动定位本机的 hpc-mcp（conda/venv/PATH），因此**不绑定**某台机器的
+conda 路径，换机器后重新 clone + 安装即可：
 
 ```bash
-# 使用你的配置文件（host/root/分区等从配置读取）
+# 在仓库目录内运行（会找到仓库的 scripts/hpc-mcp-run）
+cd ~/git_repo/HPC-MCP
 hpc-mcp mcp-add --config ~/.config/hpc-mcp/192.168.10.10.yaml
 
 # 或直接传参
@@ -176,12 +178,22 @@ hpc-mcp mcp-add --host my-hpc --user shared_account --root /home/shared_account/
 ```
 
 效果：
-- `~/.codex/config.toml` 写入 `[mcp_servers.hpc]`（绝对路径 + 所需环境变量）
-- `~/.reasonix/config.toml` 写入 hpc plugin（绝对路径 + 所需环境变量）
+- `~/.codex/config.toml` 写入 `[mcp_servers.hpc]`（command 指向 `scripts/hpc-mcp-run`）
+- `~/.reasonix/config.toml` 写入 hpc plugin（同样指向启动脚本）
+- 启动脚本按顺序定位 hpc-mcp：`$HPC_MCP_BIN` → PATH → 常见 conda/venv 路径；
+  找不到时给出清晰提示而不是静默失败
 - 只新增/更新 hpc 段，**不破坏**你已有的其它 MCP server / provider 配置
 - 幂等：重复运行不会产生重复段
 
-改完后**重启 Codex / Reasonix** 即可，无需在 conda 环境里启动客户端。
+改完后**重启 Codex / Reasonix** 即可。
+
+### 项目级 `.mcp.json`（最可移植）
+
+仓库自带 `.mcp.json`（MCP 标准项目级配置），把 hpc server 指向
+`./scripts/hpc-mcp-run`。支持项目级 MCP 的客户端（如 Codex/Reasonix
+从仓库目录启动时）会自动加载，host/root 等通过环境变量注入
+（`${HPC_MCP_HOST}` 等，在 shell profile 定义）。换机器只需：
+clone 仓库 → 安装 hpc-mcp → 定义环境变量 → 从仓库目录启动客户端。
 
 ### 手动方式（可选）
 
