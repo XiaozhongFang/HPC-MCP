@@ -161,15 +161,40 @@ class TestSubmit:
         with pytest.raises(SlurmPolicyError):
             await mgr.submit(job_name="t", working_directory=ROOT + "/proj", command=script)
 
-    async def test_submit_returns_no_partition(self):
-        """The partition name must never leak back to the agent."""
+    async def test_submit_returns_partition(self):
+        """The effective partition is returned so the agent knows where it ran."""
         ssh = FakeSsh()
         mgr = SlurmManager(make_cfg(), ssh, JobTracker(make_cfg(), ssh))
         res = await mgr.submit(
             job_name="t", working_directory=ROOT,
             command=["julia", "t.jl"],
         )
-        assert "partition" not in res
+        assert res["partition"] == "compute"  # first allowed partition default
+
+    async def test_submit_explicit_partition(self):
+        """Agent may request a partition from the allow-list."""
+        ssh = FakeSsh()
+        cfg = make_cfg()
+        cfg.slurm.allowed_partitions = ["compute", "gpu"]
+        mgr = SlurmManager(cfg, ssh, JobTracker(cfg, ssh))
+        res = await mgr.submit(
+            job_name="t", working_directory=ROOT,
+            command=["julia", "t.jl"], partition="gpu",
+        )
+        assert res["partition"] == "gpu"
+        assert "#SBATCH --partition=gpu" in ssh.submitted_scripts[0]
+
+    async def test_submit_disallowed_partition_denied(self):
+        """A partition outside the allow-list is rejected without leaking names."""
+        ssh = FakeSsh()
+        mgr = SlurmManager(make_cfg(), ssh, JobTracker(make_cfg(), ssh))
+        with pytest.raises(SlurmPolicyError) as excinfo:
+            await mgr.submit(
+                job_name="t", working_directory=ROOT,
+                command=["julia", "t.jl"], partition="gpu-long",
+            )
+        msg = str(excinfo.value)
+        assert "gpu-long" not in msg  # the requested name is redacted
 
     async def test_submit_escape_cwd_denied(self):
         ssh = FakeSsh()

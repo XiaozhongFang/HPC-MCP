@@ -166,6 +166,7 @@ class SlurmManager:
         return {
             "job_id": job_id,
             "job_name": safe_name,
+            "partition": eff["partition"],
             "working_directory": real_cwd,
             "job_dir": job_dir,
             "stdout_path": f"{job_dir}/stdout.log",

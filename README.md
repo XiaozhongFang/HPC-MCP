@@ -60,7 +60,7 @@ export HPC_MCP_LOCAL_ROOT=$PWD       # 上传/下载允许访问的本地目录
 
 `hpc.slurm.submit` 是唯一计算入口。Server 端强制：
 
-- 分区白名单（默认空 = 拒绝一切；分区名不暴露给 agent）
+- 分区白名单（默认空 = 拒绝一切；agent 只能选用白名单内的分区）
 - `max_nodes` / `max_cpus` / `max_memory_mb` / `max_gpus` / `max_time`
 - `max_concurrent_jobs`（并发上限）
 - 工作目录必须位于 USER_ROOT 内
@@ -199,7 +199,7 @@ reasonix mcp add hpc \
 
 ### 示例调用
 
-提交 Julia 作业（分区由服务端自动选择，无需也不能指定）：
+提交 Julia 作业（分区可从 `hpc.info` 返回的允许列表中选择，不指定则取配置的第一个）：
 
 ```json
 {
@@ -207,6 +207,7 @@ reasonix mcp add hpc \
   "arguments": {
     "job_name": "demo-test",
     "working_directory": "/home/shared_account/fangxiaozhong/demo_benchmark",
+    "partition": "compute",
     "cpus_per_task": 8,
     "time_limit": "00:30:00",
     "command": ["julia", "--project=.", "scripts/test.jl"]
@@ -214,8 +215,8 @@ reasonix mcp add hpc \
 }
 ```
 
-参数默认值来自服务端配置（分区、时长上限等不暴露给 agent），也可以提交
-一个 `.sh` 作业脚本路径，服务端会读取脚本里的 `#SBATCH` 指令作为默认值：
+参数默认值来自服务端配置或 `.sh` 脚本的 `#SBATCH` 指令（显式参数优先）；
+分区必须命中配置白名单，否则拒绝。也可以直接提交一个 `.sh` 作业脚本路径：
 
 ```json
 {

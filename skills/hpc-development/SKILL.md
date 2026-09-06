@@ -19,7 +19,7 @@ description: 在远程 HPC 集群上安全地进行科研计算开发（Julia/MO
 
 **默认在远程工作，不要先把文件下载到本地再改。** 远程文件可以直接读（`hpc.files.read`）、直接写（`hpc.files.write`）、直接跑（`hpc.slurm.submit`）。只有本地有而远程没有的工具/环境、或需要本地人检查产出物时，才用 `download`。
 
-1. **了解环境**：`hpc.info` 查看 working_root、local_roots 与资源上限（注意：SSH host/user 与分区名不暴露，不要尝试获取或绕过 MCP 直连）。
+1. **了解环境**：`hpc.info` 查看 working_root、local_roots、可用分区与资源上限（注意：SSH host/user 不暴露，不要尝试获取或绕过 MCP 直连）。
 2. **查看项目**：`hpc.files.list` / `hpc.files.read` 直接读远程代码，`hpc.shell.run_safe` 做 `git diff`、`ls` 等轻量检查。
 3. **远程编辑**：`hpc.files.write`（或先 `read` 再 `write` 修改片段）直接在远程改代码；小改动不需要下载。
 4. **远程提交计算**：需要编译/测试/模拟时走 `hpc.slurm.submit`：
@@ -35,7 +35,7 @@ description: 在远程 HPC 集群上安全地进行科研计算开发（Julia/MO
    }
    ```
 
-   - `working_directory` 缺省 = 配置的用户根目录；`partition` 由服务端从配置的允许列表中自动选择（不暴露给 agent）；`cpus_per_task`/`nodes`/`ntasks`/`gpus`/`time_limit` 都有安全默认值，也可从所提交 `.sh` 脚本的 `#SBATCH` 指令读取。
+   - `working_directory` 缺省 = 配置的用户根目录；`partition` 可用 `hpc.info` 查到的允许分区名指定（GPU 作业选 GPU 分区），缺省取配置的第一个；`cpus_per_task`/`nodes`/`ntasks`/`gpus`/`time_limit` 都有安全默认值，也可从所提交 `.sh` 脚本的 `#SBATCH` 指令读取。
    - 资源上限（CPU/节点/内存/GPU/时长/并发）由服务端强制，超限会被拒——先看 `hpc.info` 的限额再申请。
 5. **跟踪**：`hpc.slurm.status` 轮询，或 `hpc.jobs.wait` 等待（有上限）。
 6. **取日志**：`hpc.slurm.output`（stdout/stderr，尾部截取）；需要记账信息用 `hpc.slurm.accounting`。
@@ -71,6 +71,6 @@ description: 在远程 HPC 集群上安全地进行科研计算开发（Julia/MO
 
 ## 资源意识
 
-- 申请资源要适度：CPU、内存、时长、GPU 都受服务端上限约束，超限会被拒（分区由服务端决定，不暴露）。
+- 申请资源要适度：CPU、内存、时长、GPU 都受服务端上限约束，超限会被拒；分区只能从 `hpc.info` 显示的允许列表中选择，指定白名单外的分区会被拒绝。
 - 同时运行的作业有并发上限；先 `hpc.slurm.queue` 看自己的作业。
 - 取消自己的作业用 `hpc.slurm.cancel`（只能取消本实例提交的）。

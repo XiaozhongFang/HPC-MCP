@@ -137,6 +137,7 @@ def build_tools(
             {
                 "working_root": root,
                 "local_roots": cfg.local_roots,
+                "allowed_partitions": cfg.slurm.allowed_partitions,
                 "max_cpus": cfg.slurm.max_cpus,
                 "max_nodes": cfg.slurm.max_nodes,
                 "max_time": cfg.slurm.max_time,
@@ -150,9 +151,9 @@ def build_tools(
             name="hpc.info",
             description=(
                 "Get HPC connection info: sandboxed working root, local transfer "
-                "roots, Slurm availability, cluster name, and allowed Slurm "
-                "resource limits. Connection details (host/user) are intentionally "
-                "not exposed."
+                "roots, Slurm availability, cluster name, allowed partitions "
+                "(use one in hpc.slurm.submit) and Slurm resource limits. "
+                "Connection details (host/user) are intentionally not exposed."
             ),
             schema={"type": "object", "properties": {}, "additionalProperties": False},
             handler=hpc_info,
@@ -373,6 +374,7 @@ def build_tools(
             job_name=_str_arg(args, "job_name", required=False) or "job",
             working_directory=_str_arg(args, "working_directory", required=False) or root,
             command=command,
+            partition=_str_arg(args, "partition", required=False),
             nodes=_int_arg(args, "nodes", minimum=1),
             ntasks=_int_arg(args, "ntasks", minimum=1),
             cpus_per_task=_int_arg(args, "cpus_per_task", minimum=1),
@@ -393,14 +395,14 @@ def build_tools(
                 "submit the job here and poll hpc.slurm.status/hpc.slurm.output; "
                 "do NOT download source to the local machine and run it locally "
                 "unless the environment truly cannot be reached otherwise.\n"
-                "Parameter defaults come from the server configuration (the "
-                "partition, time limit and resource caps are configured by the "
-                "administrator and are not exposed) or, when 'command' is a "
-                "single .sh script path, from that script's #SBATCH directives "
-                "(e.g. --cpus-per-task, --time, --mem, --nodes, --ntasks). "
-                "Explicit arguments override script directives. The partition "
-                "itself is always chosen by the server from its configured "
-                "allow-list and cannot be requested or seen.\n"
+                "Parameter defaults come from the server configuration or, "
+                "when 'command' is a single .sh script path, from that script's "
+                "#SBATCH directives (e.g. --cpus-per-task, --time, --mem, "
+                "--nodes, --ntasks, --partition). Explicit arguments override "
+                "script directives. Use 'partition' to pick among the allowed "
+                "partitions reported by hpc.info (e.g. a GPU partition); the "
+                "value must be on the configured allow-list or the request is "
+                "denied. The effective partition is returned with the job.\n"
                 "Default working_directory = the configured user root; "
                 "cpus_per_task/nodes/ntasks default to 1, gpus to 0, and the "
                 "time limit defaults to the configured maximum. Job stdout/err "
@@ -421,6 +423,10 @@ def build_tools(
                         ],
                         "description": "Program argv, e.g. ['julia','--project=.','test/runtests.jl'], or a single path to a .sh job script whose #SBATCH directives provide defaults",
                     },
+                    "partition": _str(
+                        "partition",
+                        f"Slurm partition to use (default: configured one). Allowed: {', '.join(cfg.slurm.allowed_partitions) or '(none)'}",
+                    ),
                     "nodes": _int("nodes", "Node count (default 1)"),
                     "ntasks": _int("ntasks", "Task count (default 1)"),
                     "cpus_per_task": _int("cpus_per_task", "CPUs per task (default 1)"),
