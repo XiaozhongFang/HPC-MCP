@@ -76,20 +76,7 @@ export HPC_MCP_LOCAL_ROOT=$PWD       # 上传/下载允许访问的本地目录
 
 ## 安装
 
-```bash
-# pip
-python3 -m pip install --user -U pip
-pip install .
-
-# pipx
-pipx install .
-
-# uv
-uv tool install .
-
-# 或从源码运行
-python -m hpc_mcp --help
-```
+详细安装流程见 [docs/QUICKSTART.md](docs/QUICKSTART.md)
 
 安装后得到 `hpc-mcp` 命令。
 
@@ -184,7 +171,7 @@ reasonix mcp add hpc \
   --env HPC_MCP_HOST=my-hpc \
   --env HPC_MCP_ROOT=/home/shared_account/fangxiaozhong \
   --env HPC_MCP_ALLOWED_PARTITIONS=compute \
-  -- hpc-mcp
+  hpc-mcp
 ```
 
 两者都是 stdio argv 方式启动，无需 shell。

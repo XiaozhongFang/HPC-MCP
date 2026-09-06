@@ -53,6 +53,7 @@ def _cmd_check(cfg) -> int:
 
     log = get_logger()
     mgr = SshManager(cfg)
+    log.info("using ssh executable: %s", mgr.ssh_bin)
 
     async def probe_and_close():
         try:

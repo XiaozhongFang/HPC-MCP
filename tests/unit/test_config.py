@@ -1,5 +1,6 @@
 """Config loading tests."""
 
+import logging
 import os
 
 import pytest
@@ -126,6 +127,53 @@ class TestBuildConfig:
         cfg = build_config(NS(config=str(p)))
         assert cfg.ssh.ssh_bin == "/usr/bin/ssh"
         assert cfg.ssh.sftp_bin == "/usr/bin/sftp"
+
+    def test_hyphenated_keys_are_accepted(self, monkeypatch, tmp_path):
+        """CLI-style hyphenated keys must work like their snake_case form."""
+        _base_env(monkeypatch)
+        p = tmp_path / "c.yaml"
+        p.write_text(
+            "host: h\n"
+            "root: /home/u/me\n"
+            "local-root: /tmp\n"
+            "ssh-bin: /usr/bin/ssh\n"
+            "sftp-bin: /usr/bin/sftp\n"
+            "identity-file: ~/.ssh/id_ed25519\n"
+            "ssh:\n"
+            "  strict-host-key-checking: accept-new\n"
+            "slurm:\n"
+            "  allowed-partitions: [compute]\n"
+            "  max-time: '12:00:00'\n"
+        )
+        cfg = build_config(NS(config=str(p)))
+        assert cfg.ssh.ssh_bin == "/usr/bin/ssh"
+        assert cfg.ssh.sftp_bin == "/usr/bin/sftp"
+        assert cfg.ssh.identity_file is not None
+        assert cfg.ssh.identity_file.endswith("/.ssh/id_ed25519")
+        assert cfg.ssh.strict_host_key_checking == "accept-new"
+        assert cfg.slurm.allowed_partitions == ["compute"]
+        assert cfg.slurm.max_time == "12:00:00"
+
+    def test_snake_case_key_wins_over_hyphenated_alias(self, monkeypatch, tmp_path):
+        _base_env(monkeypatch)
+        p = tmp_path / "c.yaml"
+        p.write_text("host: h\nroot: /home/u/me\nssh_bin: /usr/bin/ssh\nssh-bin: /opt/ssh\n")
+        cfg = build_config(NS(config=str(p)))
+        assert cfg.ssh.ssh_bin == "/usr/bin/ssh"
+
+    def test_unknown_key_warns(self, monkeypatch, tmp_path, caplog):
+        _base_env(monkeypatch)
+        p = tmp_path / "c.yaml"
+        p.write_text("host: h\nroot: /home/u/me\nssh_bin: /usr/bin/ssh\n")
+        with caplog.at_level(logging.WARNING, logger="hpc_mcp"):
+            build_config(NS(config=str(p)))
+        assert "unknown config key" not in caplog.text
+
+        p2 = tmp_path / "d.yaml"
+        p2.write_text("host: h\nroot: /home/u/me\nsssh_bin: /usr/bin/ssh\n")
+        with caplog.at_level(logging.WARNING, logger="hpc_mcp"):
+            build_config(NS(config=str(p2)))
+        assert "sssh_bin" in caplog.text
 
     def test_bad_nested_section_is_config_error(self, monkeypatch, tmp_path):
         _base_env(monkeypatch)

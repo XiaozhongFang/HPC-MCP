@@ -189,20 +189,22 @@ def build_tools(
             max_bytes=_int_arg(args, "max_bytes", minimum=0),
             offset=_int_arg(args, "offset", 0, minimum=0) or 0,
         )
-
     tools.append(
         ToolDef(
             name="hpc.files.read",
             description=(
-                f"Read a remote text file inside {root}. Reads are size-capped; "
-                "use offset/max_bytes to page through large files."
+                f"Read a remote text file directly (no download needed) inside {root}. "
+                "Reads are size-capped; for large files pass offset/max_bytes to page "
+                "through. The result reports size, offset, bytes, end_of_file and "
+                "next_offset so you can iterate: read -> if end_of_file is false, "
+                "call again with offset=next_offset."
             ),
             schema={
                 "type": "object",
                 "properties": {
                     "path": _str("path", abs_path),
                     "max_bytes": _int("max_bytes", "Max bytes to return"),
-                    "offset": _int("offset", "Byte offset to start from", 0),
+                    "offset": _int("offset", "Byte offset to start from"),
                 },
                 "required": ["path"],
                 "additionalProperties": False,
@@ -221,7 +223,12 @@ def build_tools(
     tools.append(
         ToolDef(
             name="hpc.files.write",
-            description=f"Write (or append to) a remote file inside {root}. Size-capped.",
+            description=(
+                f"Write (or append to) a remote file inside {root}. Size-capped. "
+                "The result reports exactly what changed: change is 'created' (new "
+                "file), 'overwritten' (existing file replaced) or 'appended', with "
+                "existed_before, previous_size and new_size."
+            ),
             schema={
                 "type": "object",
                 "properties": {

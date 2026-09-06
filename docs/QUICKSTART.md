@@ -119,7 +119,7 @@ ssh alice@192.168.10.10 "echo OK && hostname"
 
 ```sshconfig
 # ~/.ssh/config
-Host tianhe
+Host 192.168.10.10
     HostName 192.168.10.10
     User alice
     IdentityFile ~/.ssh/id_ed25519
@@ -127,7 +127,7 @@ Host tianhe
     # ProxyJump jump-host
 ```
 
-配好后终端测 `ssh tianhe "echo OK"` 能通，hpc-mcp 就用 `--host tianhe`。
+配好后终端测 `ssh 192.168.10.10 "echo OK"` 能通，hpc-mcp 就用 `--host 192.168.10.10`。
 
 ---
 
@@ -139,6 +139,8 @@ Host tianhe
 hpc-mcp \
   --host 192.168.10.10 \
   --user alice \
+  --ssh-bin /mnt/c/Windows/System32/OpenSSH/ssh.exe \
+  --sftp-bin /mnt/c/Windows/System32/OpenSSH/sftp.exe \
   --root /home/home/alice/fangxiaozhong \
   --local-root "$PWD" \
   --check
@@ -152,15 +154,7 @@ hpc-mcp \
 
 ---
 
-## 4. 参数逐个说明（对应你那条命令）
-
-你运行的：
-
-```bash
-hpc-mcp --host 192.168.10.10 --user alice \
-        --root /home/home/alice/fangxiaozhong \
-        --local-root "/home/fangxiaozhong"
-```
+## 4. 参数说明
 
 | 参数 | 作用 | 环境变量 | 是否必填 |
 |---|---|---|---|
@@ -187,14 +181,16 @@ hpc-mcp --host 192.168.10.10 --user alice \
 
 ```bash
 mkdir -p ~/.config/hpc-mcp
-cat > ~/.config/hpc-mcp/tianhe.yaml <<'EOF'
-host: tianhe                                  # ~/.ssh/config 里的 Host 别名
+cat > ~/.config/hpc-mcp/192.168.10.10.yaml <<'EOF'
+host: 192.168.10.10                                  # ~/.ssh/config 里的 Host 别名
 user: alice
 root: /home/home/alice/fangxiaozhong
 local_root: /home/fangxiaozhong               # 本地允许目录
+ssh_bin: /mnt/c/Windows/System32/OpenSSH/ssh.exe
+sftp_bin: /mnt/c/Windows/System32/OpenSSH/sftp.exe
 
 slurm:
-  allowed_partitions: [compute]               # 改成你集群真实分区名！
+  allowed_partitions: [thcp1]               # 改成你集群真实分区名！
   max_cpus: 64
   max_nodes: 2
   max_time: "24:00:00"
@@ -204,11 +200,25 @@ EOF
 启动 / 自检：
 
 ```bash
-hpc-mcp --config ~/.config/hpc-mcp/tianhe.yaml --check
+hpc-mcp --config ~/.config/hpc-mcp/192.168.10.10.yaml --check
 ```
 
 > 注意：`allowed_partitions` 默认是**空**（= 拒绝一切提交，fail-closed）。
 > 务必改成你集群真实的分区名（用 `sinfo` 在集群上查）。
+
+> **键名规则**：配置文件里的键用**下划线**（`ssh_bin`、`local_root`、
+> `allowed_partitions`），和 `config/example.yaml` 保持一致。
+> 连字符写法（`ssh-bin`）也会被自动识别，但不推荐。
+> 拼错的键不会报错，只会打一行
+> `Ignoring unknown config key 'xxx'` 警告然后被忽略——看到这行就要改配置。
+
+> **改了源码/配置却没生效？** 如果你是 `pip install .` 安装的，
+> 虚拟环境里是一份**拷贝**，改仓库源码不会自动生效，必须重装：
+> ```bash
+> source ~/venvs/hpc-mcp/bin/activate
+> cd ~/git_repo/HPC-MCP && pip install .
+> # 或装成可编辑模式，以后改代码立刻生效：pip install -e .
+> ```
 
 ---
 
@@ -220,11 +230,13 @@ hpc-mcp --config ~/.config/hpc-mcp/tianhe.yaml --check
 
 ```bash
 codex mcp add hpc \
-  --env HPC_MCP_HOST=tianhe \
+  --env HPC_MCP_HOST=192.168.10.10 \
   --env HPC_MCP_USER=alice \
   --env HPC_MCP_ROOT=/home/home/alice/fangxiaozhong \
   --env HPC_MCP_LOCAL_ROOT=/home/fangxiaozhong \
-  --env HPC_MCP_ALLOWED_PARTITIONS=compute \
+  --env HPC_MCP_ALLOWED_PARTITIONS=thcp1 \
+  --env HPC_MCP_SSH_BIN=/mnt/c/Windows/System32/OpenSSH/ssh.exe \
+  --env HPC_MCP_SFTP_BIN=/mnt/c/Windows/System32/OpenSSH/sftp.exe \
   -- hpc-mcp
 ```
 
@@ -232,10 +244,14 @@ codex mcp add hpc \
 
 ```bash
 reasonix mcp add hpc \
-  --env HPC_MCP_HOST=tianhe \
+  --env HPC_MCP_HOST=192.168.10.10 \
+  --env HPC_MCP_USER=alice \
   --env HPC_MCP_ROOT=/home/home/alice/fangxiaozhong \
-  --env HPC_MCP_ALLOWED_PARTITIONS=compute \
-  -- hpc-mcp
+  --env HPC_MCP_LOCAL_ROOT=/home/fangxiaozhong \
+  --env HPC_MCP_ALLOWED_PARTITIONS=thcp1 \
+  --env HPC_MCP_SSH_BIN=/mnt/c/Windows/System32/OpenSSH/ssh.exe \
+  --env HPC_MCP_SFTP_BIN=/mnt/c/Windows/System32/OpenSSH/sftp.exe \
+ hpc-mcp
 ```
 
 注册后客户端会用 stdio 启动 `hpc-mcp`，这时你在客户端里就能让它「列出我的项目目录」「提交一个 Slurm 作业」了。
@@ -248,6 +264,7 @@ reasonix mcp add hpc \
 |---|---|---|
 | 启动后停在 `starting: ...` 不动 | **正常**，stdio server 在等客户端输入 | 不用管，去客户端里调用工具；或用 `--check` 验证 |
 | `--check` 报 `Connection timed out` | **网络不通**（内网 IP 需 VPN） | 连 VPN / 配跳板机，再 `ssh` 手动测 |
+| 命令行能连、用配置文件就连不上 | 配置里的 `ssh_bin` 没生效（键名拼错 / 装的是旧代码拷贝），于是回落到 PATH 里的 `ssh`（WSL 下是 Linux 版 ssh，不走 Windows 的 VPN 路由） | 看日志里的 `using ssh executable: ...` 是不是你配置的那个；键名改对（见第 5 节），并 `pip install .` 重装 |
 | `--check` 报 `Permission denied` | 没免密 | `ssh-copy-id` 配 key |
 | `--check` 报 `getsockname failed: Not a socket` | SSH 控制 socket 复用异常（常见于 WSL 或旧版安装） | 更新并重装 hpc-mcp；新版强制使用独立的普通 `ssh` 进程 |
 | 首次连接问 `Are you sure ... yes/no?` | 主机密钥没固定 | 手动 `ssh` 一次输入 yes；或配置 `strict_host_key_checking: accept-new` |

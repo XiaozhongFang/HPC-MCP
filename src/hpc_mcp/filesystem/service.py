@@ -134,12 +134,15 @@ class FileService:
         truncated = len(data) > cap
         if truncated:
             data = data[:cap]
+        end = offset + len(data)
         return {
             "path": real,
             "size": size,
             "offset": offset,
             "bytes": len(data),
-            "truncated": truncated or (offset + len(data)) < size,
+            "truncated": truncated,
+            "end_of_file": end >= size,
+            "next_offset": end if end < size else None,
             "content": data.decode("utf-8", errors="replace"),
         }
 
@@ -148,11 +151,15 @@ class FileService:
         data = content.encode() if isinstance(content, str) else content
         limits.check_write_size(len(data), self._cfg.files.max_write_bytes)
 
-        # ensure parent exists? Parent must already exist (fail-closed).
+        # Probe the target before writing so we can report exactly what the
+        # write changed (new file vs. overwrite vs. append).
+        st = await self._ssh.run(["stat", "-c", "%s", "--", real], check=False)
+        existed = st.exit_code == 0
+        previous_size = int(st.stdout_text.strip()) if existed else 0
+
         op = ">>" if append else ">"
         # write in base64 chunks through stdin-free exec: embed in argv is
         # unsafe for large payloads, so decode remotely from base64 heredoc.
-        # We send base64 on the command line in chunks (bounded sizes).
         total = 0
         first = True
         for i in range(0, len(data), _CHUNK):
@@ -168,7 +175,24 @@ class FileService:
             first = False
         if not data:  # empty file
             await self._ssh.run(["sh", "-c", f": {op} {_q(real)}"], check=True)
-        return {"path": real, "bytes_written": total}
+
+        if append:
+            change = "appended"
+            new_size = previous_size + total
+        elif existed:
+            change = "overwritten"
+            new_size = total
+        else:
+            change = "created"
+            new_size = total
+        return {
+            "path": real,
+            "bytes_written": total,
+            "change": change,
+            "existed_before": existed,
+            "previous_size": previous_size,
+            "new_size": new_size,
+        }
 
     async def mkdir(self, path: str, *, parents: bool = False) -> dict:
         if parents:

@@ -84,6 +84,11 @@ class SshManager:
         self._ssh_bin = _resolve_bin(cfg.ssh.ssh_bin, "ssh")
         self._lock = asyncio.Lock()
 
+    @property
+    def ssh_bin(self) -> str:
+        """Resolved path of the ssh executable actually used."""
+        return self._ssh_bin
+
     # -- connection setup ---------------------------------------------------
 
     def _base_argv(self) -> list[str]:

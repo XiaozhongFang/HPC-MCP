@@ -34,14 +34,24 @@ class FakeSsh:
         if cmd == ["stat", "-c"]:
             path = argv[-1]
             if argv[2] == "%s":
+                if path not in self.file_sizes:
+                    return RemoteResult(stdout=b"", stderr=b"stat: no such file", exit_code=1)
                 size = self.file_sizes.get(path, 0)
                 return RemoteResult(stdout=str(size).encode(), stderr=b"", exit_code=0)
         if argv[0] == "stat" and "%F" in argv[2]:
             return RemoteResult(stdout=b"regular file|10|644|u|g|1700000000", stderr=b"", exit_code=0)
         if argv[0] == "sh" and "base64" in argv[-1]:
-            # extract dd target
+            # parse the dd command: extract skip= and count=, slice accordingly
+            import re as _re
+
+            cmd = argv[-1]
             data = self.file_data.get(ROOT + "/project/f.txt", b"")
-            return RemoteResult(stdout=base64.b64encode(data), stderr=b"", exit_code=0)
+            m_skip = _re.search(r"skip=(\d+)", cmd)
+            m_count = _re.search(r"count=(\d+)", cmd)
+            skip = int(m_skip.group(1)) if m_skip else 0
+            count = int(m_count.group(1)) if m_count else len(data)
+            sliced = data[skip : skip + count]
+            return RemoteResult(stdout=base64.b64encode(sliced), stderr=b"", exit_code=0)
         if argv[0] == "find":
             return RemoteResult(stdout=b"f 10 " + ROOT.encode() + b"/project/a.jl\n", stderr=b"", exit_code=0)
         return RemoteResult(stdout=b"", stderr=b"", exit_code=0)
@@ -59,6 +69,32 @@ class TestReadSandbox:
         ssh.file_data[ROOT + "/project/f.txt"] = b"hello"
         out = await fs.read_file(ROOT + "/project/f.txt")
         assert out["content"] == "hello"
+        assert out["offset"] == 0
+        assert out["end_of_file"] is True
+
+    async def test_read_offset_applies(self):
+        ssh = FakeSsh()
+        fs = FileService(make_cfg(), ssh)
+        data = b"0123456789"
+        ssh.file_sizes[ROOT + "/project/f.txt"] = len(data)
+        ssh.file_data[ROOT + "/project/f.txt"] = data
+        out = await fs.read_file(ROOT + "/project/f.txt", offset=3, max_bytes=4)
+        assert out["content"] == "3456"
+        assert out["offset"] == 3
+        assert out["bytes"] == 4
+        assert out["end_of_file"] is False
+        assert out["next_offset"] == 7
+
+    async def test_read_offset_to_end(self):
+        ssh = FakeSsh()
+        fs = FileService(make_cfg(), ssh)
+        data = b"0123456789"
+        ssh.file_sizes[ROOT + "/project/f.txt"] = len(data)
+        ssh.file_data[ROOT + "/project/f.txt"] = data
+        out = await fs.read_file(ROOT + "/project/f.txt", offset=8)
+        assert out["content"] == "89"
+        assert out["end_of_file"] is True
+        assert out["next_offset"] is None
 
     async def test_read_escape_denied(self):
         fs = FileService(make_cfg(), FakeSsh())
@@ -99,6 +135,26 @@ class TestWriteSandbox:
         fs = FileService(make_cfg(), FakeSsh())
         with pytest.raises(PolicyDenied, match="write limit"):
             await fs.write_file(ROOT + "/f.txt", "x" * (11 * 1024 * 1024))
+
+    async def test_write_reports_created(self):
+        ssh = FakeSsh()
+        fs = FileService(make_cfg(), ssh)
+        out = await fs.write_file(ROOT + "/project/new.txt", "hello")
+        assert out["change"] == "created"
+        assert out["existed_before"] is False
+        assert out["bytes_written"] == 5
+        assert out["new_size"] == 5
+
+    async def test_write_reports_overwrite(self):
+        ssh = FakeSsh()
+        fs = FileService(make_cfg(), ssh)
+        path = ROOT + "/project/existing.txt"
+        ssh.file_sizes[path] = 10
+        out = await fs.write_file(path, "ab")
+        assert out["change"] == "overwritten"
+        assert out["existed_before"] is True
+        assert out["previous_size"] == 10
+        assert out["new_size"] == 2
 
 
 @pytest.mark.asyncio

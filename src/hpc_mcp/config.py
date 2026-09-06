@@ -11,6 +11,7 @@ resource limits unless the user explicitly configures more.
 
 from __future__ import annotations
 
+import logging
 import os
 import posixpath
 import re
@@ -198,6 +199,102 @@ def _safe_text(value: Any, name: str) -> str:
     return value
 
 
+def _normalize_keys(value: Any) -> Any:
+    """Accept hyphenated keys (``ssh-bin``) as aliases of snake_case ones.
+
+    CLI flags are spelled with hyphens (``--ssh-bin``) while the internal
+    config dataclasses use underscores (``ssh_bin``).  Hyphenated keys used to
+    be ignored silently, so a config file could behave differently from the
+    equivalent command line (e.g. falling back to the ``ssh`` found on PATH
+    instead of the configured one).  When both spellings are present the
+    underscore key wins.
+    """
+    if isinstance(value, list):
+        return [_normalize_keys(v) for v in value]
+    if not isinstance(value, dict):
+        return value
+    out: dict[str, Any] = {}
+    for key, val in value.items():
+        if isinstance(key, str) and "-" in key:
+            out[key.replace("-", "_")] = _normalize_keys(val)
+    for key, val in value.items():
+        if not (isinstance(key, str) and "-" in key):
+            out[key] = _normalize_keys(val)
+    return out
+
+
+#: Recognised config sections/keys.  Anything else is reported as a warning so
+#: a typo cannot silently disable the setting the user intended to apply.
+_KNOWN_KEYS: dict[str, frozenset[str]] = {
+    "": frozenset(
+        {
+            "host",
+            "port",
+            "user",
+            "root",
+            "local_root",
+            "identity_file",
+            "ssh",
+            "slurm",
+            "shell",
+            "files",
+            "wait_max_seconds",
+            "log_file",
+            "log_level",
+            # ssh.* settings may also be written at the top level
+            "connect_timeout",
+            "command_timeout",
+            "strict_host_key_checking",
+            "ssh_bin",
+            "sftp_bin",
+        }
+    ),
+    "ssh": frozenset(
+        {
+            "host",
+            "port",
+            "user",
+            "identity_file",
+            "connect_timeout",
+            "command_timeout",
+            "strict_host_key_checking",
+            "ssh_bin",
+            "sftp_bin",
+        }
+    ),
+    "slurm": frozenset(
+        {
+            "allowed_partitions",
+            "max_nodes",
+            "max_cpus",
+            "max_memory_mb",
+            "max_gpus",
+            "max_time",
+            "max_concurrent_jobs",
+        }
+    ),
+    "shell": frozenset({"safe_commands", "max_exec_seconds", "max_output_bytes"}),
+    "files": frozenset({"max_read_bytes", "max_write_bytes", "max_list_entries"}),
+}
+
+
+def _warn_unknown_keys(data: dict[str, Any], source: Path) -> None:
+    """Warn about unrecognised config keys, which are otherwise ignored."""
+    logger = logging.getLogger("hpc_mcp")
+    for section, known in _KNOWN_KEYS.items():
+        mapping = data.get(section) if section else data
+        if not isinstance(mapping, dict):
+            continue
+        prefix = f"{section}." if section else ""
+        for key in mapping:
+            if isinstance(key, str) and key not in known:
+                logger.warning(
+                    "Ignoring unknown config key %r in %s (check for typos)",
+                    f"{prefix}{key}",
+                    source,
+                )
+
+
 def load_config_file(path: str | None) -> dict[str, Any]:
     """Load a YAML (or JSON) config file.  Missing file => empty dict."""
     if not path:
@@ -213,6 +310,8 @@ def load_config_file(path: str | None) -> dict[str, Any]:
         return {}
     if not isinstance(data, dict):
         raise ConfigError(f"Config file {p} must contain a mapping at the top level")
+    data = _normalize_keys(data)
+    _warn_unknown_keys(data, p)
     return data
 
 
