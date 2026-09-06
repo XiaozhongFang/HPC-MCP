@@ -136,6 +136,7 @@ def build_tools(
                 "host": cfg.ssh.host,
                 "user": cfg.ssh.user,
                 "working_root": root,
+                "local_roots": cfg.local_roots,
                 "allowed_partitions": cfg.slurm.allowed_partitions,
             }
         )

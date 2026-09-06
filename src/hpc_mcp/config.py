@@ -15,6 +15,7 @@ import logging
 import os
 import posixpath
 import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -133,8 +134,17 @@ class Config:
     wait_max_seconds: int = DEFAULT_WAIT_MAX_SECONDS
     log_file: str | None = None
     log_level: str = "INFO"
-    # Local directory that transfer tools may read/write.
-    local_root: str = field(default_factory=lambda: str(Path.cwd().resolve()))
+    # Local directories that transfer tools may read/write.  Defaults to the
+    # current working directory plus the system temp dir (TMPDIR or /tmp), so
+    # quick local tests in /tmp work out of the box.
+    local_roots: list[str] = field(
+        default_factory=lambda: [str(Path.cwd().resolve()), str(Path(tempfile.gettempdir()).resolve())]
+    )
+
+    @property
+    def local_root(self) -> str:
+        """Primary local root (first of ``local_roots``) for backwards compat."""
+        return self.local_roots[0] if self.local_roots else str(Path.cwd().resolve())
 
     @property
     def jobs_dir(self) -> str:
@@ -233,6 +243,7 @@ _KNOWN_KEYS: dict[str, frozenset[str]] = {
             "user",
             "root",
             "local_root",
+            "local_roots",
             "identity_file",
             "ssh",
             "slurm",
@@ -487,21 +498,39 @@ def build_config(cli_args: Any | None = None, environ: dict[str, str] | None = N
         raise ConfigError(f"Invalid log level: {log_level!r}")
 
     local_root_value = _coalesce(cli.get("local_root"), _env("LOCAL_ROOT", env), file_data.get("local_root"))
+    local_roots_value = _coalesce(file_data.get("local_roots"), _env_list("LOCAL_ROOTS", env))
     if local_root_value is not None and not isinstance(local_root_value, str):
         raise ConfigError("local_root must be a path string")
-    local_root_path = Path(local_root_value or Path.cwd()).expanduser()
-    try:
-        local_root = local_root_path.resolve(strict=True)
-    except OSError as exc:
-        raise ConfigError(f"Local root cannot be resolved: {local_root_path}") from exc
-    if not local_root.is_dir():
-        raise ConfigError(f"Local root must be a directory: {local_root}")
-    if local_root.name.lower() in {".ssh", ".gnupg"}:
-        raise ConfigError("local_root may not be a credential directory")
+    if local_roots_value is not None and not isinstance(local_roots_value, list):
+        raise ConfigError("local_roots must be a list of path strings")
+    local_roots: list[str] = []
+    if local_roots_value is not None:
+        raw_roots = local_roots_value
+    elif local_root_value is not None:
+        raw_roots = [local_root_value]
+    else:
+        raw_roots = [str(Path.cwd())]  # default: cwd + tempdir
+    for entry in raw_roots:
+        p = Path(str(entry)).expanduser()
+        try:
+            resolved = p.resolve(strict=True)
+        except OSError as exc:
+            raise ConfigError(f"Local root cannot be resolved: {p}") from exc
+        if not resolved.is_dir():
+            raise ConfigError(f"Local root must be a directory: {resolved}")
+        if resolved.name.lower() in {".ssh", ".gnupg"}:
+            raise ConfigError("local_root may not be a credential directory")
+        local_roots.append(str(resolved))
+    # Always include the system temp dir so quick local tests in /tmp work.
+    tmp = str(Path(tempfile.gettempdir()).resolve())
+    if tmp not in local_roots:
+        local_roots.append(tmp)
+    if not local_roots:
+        raise ConfigError("At least one local root is required")
 
     return Config(
         root=root,
-        local_root=str(local_root),
+        local_roots=local_roots,
         ssh=ssh,
         slurm=slurm,
         shell=shell_cfg,

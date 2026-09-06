@@ -44,7 +44,7 @@ HPC_MCP_ROOT=/home/shared_account/fangxiaozhong
 export HPC_MCP_LOCAL_ROOT=$PWD       # 上传/下载允许访问的本地目录
 ```
 
-所有远程文件操作都被限制在该 root 之下（含符号链接 canonical 校验）。本地 `upload`/`download` 同样被限制在 `local_root`，拒绝 `.ssh`、私钥和符号链接路径；默认值是启动进程的当前目录。其他用户的目录（`/home/shared_account/other_user`）、系统目录（`/etc`、`/tmp`、`/opt`）一律拒绝。
+所有远程文件操作都被限制在该 root 之下（含符号链接 canonical 校验）。本地 `upload`/`download` 同样被限制在 `local_roots`（一个或多个本地允许目录，默认 = 启动进程当前目录 + 系统临时目录 `/tmp`），拒绝 `.ssh`、私钥和符号链接路径。其他用户的目录（`/home/shared_account/other_user`）、系统目录（`/etc`、`/opt`）一律拒绝。
 
 ### Login Node 策略
 

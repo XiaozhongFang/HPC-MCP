@@ -128,6 +128,36 @@ class TestBuildConfig:
         assert cfg.ssh.ssh_bin == "/usr/bin/ssh"
         assert cfg.ssh.sftp_bin == "/usr/bin/sftp"
 
+    def test_local_roots_default_includes_tmp(self, monkeypatch):
+        _base_env(monkeypatch)
+        cfg = build_config(NS(host="h", root="/home/u/me"))
+        assert isinstance(cfg.local_roots, list)
+        assert "/tmp" in cfg.local_roots  # system temp dir always allowed
+        assert cfg.local_root == cfg.local_roots[0]  # backwards-compat property
+
+    def test_local_roots_yaml_list(self, monkeypatch, tmp_path):
+        _base_env(monkeypatch)
+        d1 = tmp_path / "da"
+        d2 = tmp_path / "db"
+        d1.mkdir()
+        d2.mkdir()
+        p = tmp_path / "c.yaml"
+        p.write_text(f"host: h\nroot: /home/u/me\nlocal_roots: [{d1}, {d2}]\n")
+        cfg = build_config(NS(config=str(p)))
+        assert str(d1) in cfg.local_roots
+        assert str(d2) in cfg.local_roots
+        assert "/tmp" in cfg.local_roots  # temp always appended
+
+    def test_local_root_single_still_works(self, monkeypatch, tmp_path):
+        _base_env(monkeypatch)
+        d = tmp_path / "da"
+        d.mkdir()
+        p = tmp_path / "c.yaml"
+        p.write_text(f"host: h\nroot: /home/u/me\nlocal_root: {d}\n")
+        cfg = build_config(NS(config=str(p)))
+        assert str(d) in cfg.local_roots
+        assert "/tmp" in cfg.local_roots
+
     def test_hyphenated_keys_are_accepted(self, monkeypatch, tmp_path):
         """CLI-style hyphenated keys must work like their snake_case form."""
         _base_env(monkeypatch)

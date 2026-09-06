@@ -19,7 +19,7 @@ class TransferService:
         self._files = files
 
     async def upload(self, local_path: str, remote_path: str) -> dict:
-        local_name = validate_local_path(local_path, self._cfg.local_root)
+        local_name = validate_local_path(local_path, self._cfg.local_roots)
         lp = Path(local_name)
         if not lp.is_file():
             raise PolicyDenied(f"Local path is not a regular file: {local_path}")
@@ -34,7 +34,7 @@ class TransferService:
         if st["type"] != "regular file":
             raise PolicyDenied(f"Remote path is not a regular file: {real_remote}")
         limits.check_read_size(st["size"], self._cfg.files.max_read_bytes * 10)
-        local_name = validate_local_path(local_path, self._cfg.local_root, for_write=True)
+        local_name = validate_local_path(local_path, self._cfg.local_roots, for_write=True)
         lp = Path(local_name)
         if not lp.parent.is_dir():
             raise PolicyDenied(f"Local destination directory does not exist: {lp.parent}")

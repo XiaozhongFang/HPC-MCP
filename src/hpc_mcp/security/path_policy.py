@@ -106,25 +106,41 @@ def validate_path(path: str, user_root: str) -> str:
     return normalize_lexical(path, user_root)
 
 
-def validate_local_path(path: str, local_root: str, *, for_write: bool = False) -> str:
-    """Resolve a local transfer path under ``local_root`` without symlinks.
+def validate_local_path(path: str, local_roots: str | list[str], *, for_write: bool = False) -> str:
+    """Resolve a local transfer path under one of the allowed ``local_roots``.
 
     Uploads must name a regular file and downloads must target an existing
     directory tree.  Refusing symlink components prevents an agent from using
     a transfer as a local secret read or arbitrary overwrite primitive.
     """
     if not isinstance(path, str) or not path or _FORBIDDEN_CHARS.search(path):
-        raise PathSandboxError("Local path must be a non-empty path without control characters", requested=str(path), scope=local_root)
-    root = Path(local_root).expanduser().resolve(strict=True)
+        raise PathSandboxError("Local path must be a non-empty path without control characters", requested=str(path), scope=str(local_roots))
+    roots = [local_roots] if isinstance(local_roots, str) else list(local_roots)
+    roots = [str(Path(r).expanduser().resolve(strict=True)) for r in roots if r]
+    if not roots:
+        raise PathSandboxError("No local roots configured", requested=path)
+
     candidate = Path(path).expanduser()
-    candidate_abs = candidate if candidate.is_absolute() else root / candidate
-    # Inspect the user-supplied path before resolving it; otherwise a symlink
-    # to another in-root file would disappear from the check.
-    current = root
+    # Try each root: the path is allowed if it fits under ANY of them.
+    last_err: PathSandboxError | None = None
+    for root_str in roots:
+        root = Path(root_str)
+        candidate_abs = candidate if candidate.is_absolute() else root / candidate
+        try:
+            return _validate_local_path_under(path, candidate_abs, root, for_write=for_write)
+        except PathSandboxError as exc:
+            last_err = exc
+            continue
+    raise last_err if last_err else PathSandboxError("Local path is not allowed", requested=path, scope=str(roots))
+
+
+def _validate_local_path_under(path: str, candidate_abs: Path, root: Path, *, for_write: bool) -> str:
+    """Validate that ``candidate_abs`` stays inside a single local ``root``."""
     try:
         relative_candidate = candidate_abs.relative_to(root)
     except ValueError as exc:
         raise PathSandboxError("Local path escapes the configured local root", requested=path, scope=str(root)) from exc
+    current = root
     for part in relative_candidate.parts:
         current = current / part
         if current.is_symlink():
