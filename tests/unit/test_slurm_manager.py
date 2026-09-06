@@ -87,6 +87,17 @@ class TestSubmit:
         assert f"#SBATCH --output={ROOT}/.hpc-mcp/jobs/%j.stdout.log" in ssh.submitted_scripts[0]
         assert ssh.register["424242"]["job_name"] == "t"
 
+    async def test_submit_defaults_working_dir_to_root(self):
+        """When working_directory is omitted the user root is used."""
+        ssh = FakeSsh()
+        mgr = SlurmManager(make_cfg(), ssh, JobTracker(make_cfg(), ssh))
+        res = await mgr.submit(
+            job_name="t", working_directory=ROOT,
+            command=["julia", "t.jl"],
+        )
+        assert res["working_directory"] == ROOT
+        assert f"#SBATCH --chdir={ROOT}" in ssh.submitted_scripts[0]
+
     async def test_submit_escape_cwd_denied(self):
         ssh = FakeSsh()
         mgr = SlurmManager(make_cfg(), ssh, JobTracker(make_cfg(), ssh))

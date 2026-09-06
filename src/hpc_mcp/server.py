@@ -115,9 +115,10 @@ def create_server(cfg: Config) -> tuple[Server, list[ToolDef]]:
 async def run_server(cfg: Config) -> None:
     log = get_logger()
     server, _tools = create_server(cfg)
+    # Do not log host/user: stderr may surface in the MCP client's logs.
     log.info(
-        "hpc-mcp %s starting: host=%s user=%s root=%s partitions=%s",
-        __version__, cfg.ssh.host, cfg.ssh.user, cfg.root, cfg.slurm.allowed_partitions,
+        "hpc-mcp %s starting: root=%s partitions=%s (SSH host/user withheld)",
+        __version__, cfg.root, cfg.slurm.allowed_partitions,
     )
     try:
         async with stdio_server() as (read_stream, write_stream):

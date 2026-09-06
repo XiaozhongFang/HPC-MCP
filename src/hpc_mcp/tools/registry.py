@@ -131,13 +131,16 @@ def build_tools(
     # ------------------------------------------------------------------ info
     async def hpc_info(args: dict) -> dict:
         info = await ssh.probe()
+        # NOTE: never expose SSH connection details (host/user/ip/port) to the
+        # agent -- that would let it bypass the MCP and log in directly.
         info.update(
             {
-                "host": cfg.ssh.host,
-                "user": cfg.ssh.user,
                 "working_root": root,
                 "local_roots": cfg.local_roots,
                 "allowed_partitions": cfg.slurm.allowed_partitions,
+                "max_cpus": cfg.slurm.max_cpus,
+                "max_nodes": cfg.slurm.max_nodes,
+                "max_time": cfg.slurm.max_time,
             }
         )
         return info
@@ -146,8 +149,10 @@ def build_tools(
         ToolDef(
             name="hpc.info",
             description=(
-                "Get HPC connection info: host, user, sandboxed working root, "
-                "whether Slurm is available, and the cluster name."
+                "Get HPC connection info: sandboxed working root, local transfer "
+                "roots, Slurm availability, cluster name, and allowed Slurm "
+                "resource limits. Connection details (host/user) are intentionally "
+                "not exposed."
             ),
             schema={"type": "object", "properties": {}, "additionalProperties": False},
             handler=hpc_info,
@@ -366,7 +371,7 @@ def build_tools(
             raise PolicyDenied("command must be a string or argv list")
         return await slurm.submit(
             job_name=_str_arg(args, "job_name", required=False) or "job",
-            working_directory=_str_arg(args, "working_directory"),
+            working_directory=_str_arg(args, "working_directory", required=False) or root,
             command=command,
             partition=_str_arg(args, "partition", required=False),
             nodes=_int_arg(args, "nodes", 1, minimum=1) or 1,
@@ -382,16 +387,28 @@ def build_tools(
         ToolDef(
             name="hpc.slurm.submit",
             description=(
-                "Submit a compute job to Slurm via sbatch. All computation "
-                "(Julia/Python/make/cmake/mpirun/tests) MUST go through this tool "
-                "-- never run workloads on the login node. Resources are "
-                "policy-limited; job output is captured under .hpc-mcp/jobs/<id>/."
+                "Submit a compute job to Slurm via sbatch. This is the ONLY way "
+                "to run computation (Julia/Python/make/cmake/mpirun/tests) on the "
+                "HPC -- running workloads directly on the login node is denied. "
+                "Prefer working remotely: edit files with hpc.files.write, then "
+                "submit the job here and poll hpc.slurm.status/hpc.slurm.output; "
+                "do NOT download source to the local machine and run it locally "
+                "unless the environment truly cannot be reached otherwise.\n"
+                "Defaults (from server config, overridable per call): "
+                "working_directory = the configured user root; partition = the "
+                "configured allowed partition (first one if several); "
+                f"allowed partitions: {', '.join(cfg.slurm.allowed_partitions) or '(none configured)'}; "
+                f"cpus_per_task=1, nodes=1, ntasks=1, gpus=0, max_time={cfg.slurm.max_time}. "
+                "Job stdout/stderr is captured under .hpc-mcp/jobs/<id>/."
             ),
             schema={
                 "type": "object",
                 "properties": {
-                    "job_name": _str("job_name", "Short job name"),
-                    "working_directory": _str("working_directory", f"Job working directory inside {root}"),
+                    "job_name": _str("job_name", "Short job name (default 'job')"),
+                    "working_directory": _str(
+                        "working_directory",
+                        f"Job working directory inside {root} (default: {root})",
+                    ),
                     "command": {
                         "oneOf": [
                             {"type": "array", "items": {"type": "string"}},
@@ -399,16 +416,16 @@ def build_tools(
                         ],
                         "description": "Program argv, e.g. ['julia','--project=.','test/runtests.jl']",
                     },
-                    "partition": _str("partition", "Slurm partition (must be allowed)"),
-                    "nodes": _int("nodes", "Node count", 1),
-                    "ntasks": _int("ntasks", "Task count", 1),
-                    "cpus_per_task": _int("cpus_per_task", "CPUs per task", 1),
-                    "memory": _str("memory", "Memory, e.g. '16G'"),
-                    "time_limit": _str("time_limit", "Wall limit, e.g. '00:30:00'"),
-                    "gpus": _int("gpus", "GPU count", 0),
+                    "partition": _str("partition", f"Slurm partition (default: {cfg.slurm.allowed_partitions[0] if cfg.slurm.allowed_partitions else 'configured one'})"),
+                    "nodes": _int("nodes", "Node count (default 1)", 1),
+                    "ntasks": _int("ntasks", "Task count (default 1)", 1),
+                    "cpus_per_task": _int("cpus_per_task", "CPUs per task (default 1)", 1),
+                    "memory": _str("memory", "Memory, e.g. '16G' (default: none)"),
+                    "time_limit": _str("time_limit", f"Wall limit, e.g. '00:30:00' (default {cfg.slurm.max_time})"),
+                    "gpus": _int("gpus", "GPU count (default 0)", 0),
                     "environment": {"type": "object", "additionalProperties": {"type": "string"}},
                 },
-                "required": ["working_directory", "command"],
+                "required": ["command"],
                 "additionalProperties": False,
             },
             handler=slurm_submit,

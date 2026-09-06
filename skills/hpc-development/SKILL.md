@@ -15,30 +15,37 @@ description: 在远程 HPC 集群上安全地进行科研计算开发（Julia/MO
 4. `hpc.shell.run_safe` 仅限轻量查询（`ls`、`cat`、`git status/diff/log`、`module list` 等），不支持管道/重定向/命令串联；`squeue`/`sacct`/`scontrol` 必须通过带归属检查的 Slurm 工具查询。
 5. 文件传输只能使用配置的 `local_root` 与远程 `HPC_MCP_ROOT`；不要上传 `.ssh`、私钥或符号链接。
 
-## 标准工作流
+## 标准工作流（优先远程直接操作）
 
-1. **本地检查**：先在本地阅读、修改代码，做本地静态/轻量检查。
-2. **同步代码**：`hpc.files.upload`（或 `hpc.files.write` 写小文件）。
-3. **轻量验证**：`hpc.shell.run_safe` 运行 `git diff`、`ls`、`module avail` 等。
-4. **提交计算**：需要编译/测试/模拟时：
+**默认在远程工作，不要先把文件下载到本地再改。** 远程文件可以直接读（`hpc.files.read`）、直接写（`hpc.files.write`）、直接跑（`hpc.slurm.submit`）。只有本地有而远程没有的工具/环境、或需要本地人检查产出物时，才用 `download`。
+
+1. **了解环境**：`hpc.info` 查看 working_root、local_roots、允许的分区与资源上限（注意：SSH host/user 不暴露，不要尝试获取或绕过 MCP 直连）。
+2. **查看项目**：`hpc.files.list` / `hpc.files.read` 直接读远程代码，`hpc.shell.run_safe` 做 `git diff`、`ls` 等轻量检查。
+3. **远程编辑**：`hpc.files.write`（或先 `read` 再 `write` 修改片段）直接在远程改代码；小改动不需要下载。
+4. **远程提交计算**：需要编译/测试/模拟时走 `hpc.slurm.submit`：
 
    ```json
    {
      "tool": "hpc.slurm.submit",
      "arguments": {
        "job_name": "descriptive-name",
-       "working_directory": "<root 内的项目目录>",
-       "partition": "<允许的分区>",
-       "cpus_per_task": 8,
-       "time_limit": "00:30:00",
-       "command": ["julia", "--project=.", "test/runtests.jl"]
+       "command": ["julia", "--project=.", "test/runtests.jl"],
+       "cpus_per_task": 8
      }
    }
    ```
 
+   - `working_directory` 缺省 = 配置的用户根目录；`partition` 缺省 = 配置的允许分区；`cpus_per_task`/`nodes`/`ntasks`/`gpus`/`time_limit` 都有安全默认值。
+   - 资源上限（CPU/节点/内存/GPU/时长/并发）由服务端强制，超限会被拒——先看 `hpc.info` 的限额再申请。
 5. **跟踪**：`hpc.slurm.status` 轮询，或 `hpc.jobs.wait` 等待（有上限）。
 6. **取日志**：`hpc.slurm.output`（stdout/stderr，尾部截取）；需要记账信息用 `hpc.slurm.accounting`。
-7. **分析失败 → 修改 → 重复**。
+7. **分析失败 → 远程修改（步骤 3）→ 重复**，直到通过。
+
+### 什么时候才下载到本地
+
+- 需要本地工具分析/可视化产出文件，且本地环境具备对应工具。
+- 本地有而远程缺失的依赖，需要本地验证。
+- 下载目标必须位于 `hpc.info` 返回的 `local_roots` 之一。
 
 ## Julia 项目
 
