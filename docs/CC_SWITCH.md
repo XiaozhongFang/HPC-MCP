@@ -27,7 +27,6 @@ hpc-mcp 是 **stdio** 类型的 MCP server：CC-Switch 里用 `type: "stdio"` +
     "HPC_MCP_SSH_BIN": "/usr/bin/ssh",
     "HPC_MCP_SFTP_BIN": "/usr/bin/sftp",
     "HPC_MCP_PORT": "22",
-    "HPC_MCP_IDENTITY_FILE": "~/.ssh/id_ed25519",
     "HPC_MCP_LOG_FILE": "/home/yourname/.local/share/hpc-mcp/hpc-mcp.log",
     "HPC_MCP_LOG_LEVEL": "INFO"
   }
