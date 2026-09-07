@@ -207,6 +207,28 @@ hpc-mcp mcp-add --host my-hpc --user shared_account --root /home/shared_account/
 
 改完后**重启 Codex / Reasonix** 即可。
 
+### CC-Switch（MCP 配置管理器）
+
+[CC-Switch](https://github.com/farion1231/cc-switch) 用 JSON 管理多个 MCP
+server 配置并支持一键切换。完整的 stdio JSON 配置（`command` +
+`env`）、字段说明与常见问题见 **[`docs/CC_SWITCH.md`](docs/CC_SWITCH.md)**：
+
+```json
+{
+  "name": "hpc-mcp",
+  "type": "stdio",
+  "command": "/home/yourname/git_repo/HPC-MCP/scripts/hpc-mcp-run",
+  "args": [],
+  "env": {
+    "HPC_MCP_HOST": "my-hpc",
+    "HPC_MCP_USER": "shared_account",
+    "HPC_MCP_ROOT": "/home/shared_account/alice",
+    "HPC_MCP_LOCAL_ROOT": "/home/yourname/my-project",
+    "HPC_MCP_ALLOWED_PARTITIONS": "compute,debug"
+  }
+}
+```
+
 ### 项目级 `.mcp.json`（最可移植）
 
 仓库自带 `.mcp.json`（MCP 标准项目级配置），把 hpc server 指向
