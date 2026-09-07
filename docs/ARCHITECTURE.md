@@ -51,14 +51,50 @@ Slurm writes to a flat `%j.stdout.log`/`%j.stderr.log` staging file because it
 cannot create an intermediate directory before opening output; the server then
 creates the canonical job directory and links those files below it.
 
-## Deliberate residual risk
+## Query cost boundaries
+
+Shared-account safety also means *not loading other users' or huge amounts of
+data into the MCP process at all*:
+
+- **Owned-only Slurm queries.** `status`/`queue`/submit's active-job count run
+  `squeue -j <tracked ids>` only. With no tracked jobs the call returns without
+  any `squeue` invocation. Foreign job metadata never enters the process.
+- **Bounded file reads.** `hpc.files.read` returns one slice capped by
+  `files.max_read_slice_bytes` (default 256 KiB); tool descriptions steer the
+  agent to `hpc.files.search` first instead of paging to EOF.
+- **Bounded recursive listing.** `hpc.files.list` enumerates one depth layer
+  per remote call, cuts remote output with `head` (SIGPIPE detection via
+  `bash -o pipefail`), and resumes with a `depth:N` cursor.
+- **Bounded search.** `hpc.files.search` (single file: stat + refuse oversized;
+  tree: `grep -rn` + excluded dirs + per-file `-m` + global `head` + `timeout`)
+  has every budget clamped server-side; the pattern travels as a quoted grep
+  argument and control characters are rejected.
+- **High-level tools.** `hpc.jobs.diagnose` (state + accounting + bounded tails
+  + error signatures) and `hpc.project.snapshot` (bounded tree + git summary +
+  tracked jobs) collapse several low-level calls into one, each query bounded.
+- **Query cache.** Idempotent read-only tools dedupe on `tool + normalized
+  args` for `cache_ttl_seconds` (default 2 s, 0 disables); any mutating tool
+  invalidates the whole cache.
+
+## Deliberate residual risk (three layers)
+
+| Layer | Enforcement | Protects against |
+|---|---|---|
+| 1. MCP policy | path sandbox, command allow-list, Slurm resource policy, job ownership, query budgets, audit | a misbehaving agent |
+| 2. Slurm | partition allow-list, resource/concurrency ceilings, single `sbatch` entry | compute-resource abuse |
+| 3. OS/cluster | separate Unix UID, Slurm job isolation + filesystem ACL, container sandbox, or a privileged remote helper | *hostile code* isolation |
 
 The remote host is a shared Unix account, so a process with equivalent account
 permissions can race a path between canonicalization and the final command.
 The server minimizes this window and refuses symlink targets, but complete race
 freedom requires a privileged remote helper using `openat(2)`/`O_NOFOLLOW` or a
-separate Unix account per user. Deploy that helper when hostile same-account
-users are in scope. The JSON tracking file is likewise a logical session
-boundary, not an operating-system access-control boundary: an equivalent Unix
-account can read or modify it. Use separate Unix accounts or a privileged
-metadata service when peers sharing the account are considered hostile.
+separate Unix account per user. The JSON tracking file is likewise a logical
+session boundary, not an operating-system access-control boundary: an
+equivalent Unix account can read or modify it.
+
+Critically, `hpc.slurm.submit` grants the agent the ability to execute programs
+as that Unix UID on compute nodes. Layers 1-2 cannot contain hostile code that
+then reads everything the UID can read. Do not rely on regex/policy filtering of
+"obviously malicious" Julia/Python as an OS-level isolation mechanism; deploy
+Layer 3 (independent UID, job isolation + ACLs, or a container/sandbox) when
+hostile same-account code is in scope.

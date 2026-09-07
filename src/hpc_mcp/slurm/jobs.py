@@ -163,6 +163,16 @@ class JobTracker:
             result.append(entry)
         return result
 
+    async def list_owned_job_ids(self) -> list[str]:
+        """Job IDs tracked by *this* instance.
+
+        This is the only source of job IDs that may ever be passed to
+        ``squeue``/``sacct``.  Querying the full shared-account queue would
+        leak other users' job metadata to the MCP process; ownership checks
+        must never trigger a whole-account scan.
+        """
+        return [entry["job_id"] for entry in await self.list_mine()]
+
     def _entry_is_owned(self, job_id: str, entry: object) -> bool:
         expected_dir = f"{self._jobs_dir}/{job_id}"
         return (

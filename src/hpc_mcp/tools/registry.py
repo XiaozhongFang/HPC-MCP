@@ -13,8 +13,10 @@ from typing import Any, Awaitable, Callable
 
 from ..config import Config
 from ..errors import PolicyDenied
+from ..filesystem.search import FileSearchService
 from ..filesystem.service import FileService
 from ..filesystem.transfer import TransferService
+from ..project.snapshot import ProjectService
 from ..shell.safe_exec import SafeExec
 from ..slurm.manager import SlurmManager
 from ..ssh.manager import SshManager
@@ -87,8 +89,12 @@ def build_tools(
     transfer: TransferService,
     safe_exec: SafeExec,
     slurm: SlurmManager,
+    search: FileSearchService | None = None,
+    projects: ProjectService | None = None,
 ) -> list[ToolDef]:
     root = cfg.root
+    search_svc = search or FileSearchService(cfg, ssh)
+    projects_svc = projects or ProjectService(cfg, ssh, files, safe_exec, slurm._tracker)
 
     def _str(_name: str, desc: str) -> dict:
         return {"type": "string", "description": desc}
@@ -133,10 +139,13 @@ def build_tools(
         info = await ssh.probe()
         # NOTE: never expose SSH connection details (host/user/ip/port) to the
         # agent -- that would let it bypass the MCP and log in directly.
+        # Local roots are also withheld (they can embed usernames/project
+        # names); only capability booleans are surfaced.
         info.update(
             {
                 "working_root": root,
-                "local_roots": cfg.local_roots,
+                "workspace_available": any(isinstance(r, str) and r for r in cfg.local_roots),
+                "transfer_enabled": bool(cfg.local_roots),
                 "allowed_partitions": cfg.slurm.allowed_partitions,
                 "max_cpus": cfg.slurm.max_cpus,
                 "max_nodes": cfg.slurm.max_nodes,
@@ -151,9 +160,10 @@ def build_tools(
             name="hpc.info",
             description=(
                 "Get HPC connection info: sandboxed working root, local transfer "
-                "roots, Slurm availability, cluster name, allowed partitions "
-                "(use one in hpc.slurm.submit) and Slurm resource limits. "
-                "Connection details (host/user) are intentionally not exposed."
+                "availability (workspace_available/transfer_enabled), Slurm "
+                "availability, cluster name, allowed partitions (use one in "
+                "hpc.slurm.submit) and Slurm resource limits. Connection details "
+                "(host/user) and local path roots are intentionally not exposed."
             ),
             schema={"type": "object", "properties": {}, "additionalProperties": False},
             handler=hpc_info,
@@ -168,18 +178,32 @@ def build_tools(
             _str_arg(args, "path"),
             recursive=_bool_arg(args, "recursive"),
             max_entries=_int_arg(args, "max_entries", minimum=0),
+            page_size=_int_arg(args, "page_size", minimum=0),
+            cursor=args.get("cursor"),
+            max_depth=_int_arg(args, "max_depth", minimum=1),
         )
 
     tools.append(
         ToolDef(
             name="hpc.files.list",
-            description=f"List directory contents on the HPC. Path must be inside {root}.",
+            description=(
+                f"List directory contents on the HPC. Path must be inside {root}. "
+                "Returns a bounded page ({page_size} entries at most, server-capped) "
+                "plus a next_cursor. Prefer recursive=false (default). For recursive "
+                "listing the server enumerates one depth level per call and stops "
+                "early once the page is full, so huge trees are never scanned in a "
+                "single call: pass the returned next_cursor to continue from the "
+                "next depth. max_depth is clamped by the server."
+            ),
             schema={
                 "type": "object",
                 "properties": {
                     "path": _str("path", abs_path),
                     "recursive": {"type": "boolean", "default": False},
-                    "max_entries": _int("max_entries", "Cap on returned entries"),
+                    "max_entries": _int("max_entries", "Hard cap on returned entries (server-capped)"),
+                    "page_size": _int("page_size", "Entries per page (default: max_entries)"),
+                    "cursor": _str("cursor", "Opaque cursor from a previous call to continue a recursive listing"),
+                    "max_depth": _int("max_depth", "Recursive depth limit (clamped by server config)"),
                 },
                 "required": ["path"],
                 "additionalProperties": False,
@@ -200,20 +224,20 @@ def build_tools(
         ToolDef(
             name="hpc.files.read",
             description=(
-                f"Read a remote text file directly (no download needed) inside {root}. "
-                "Each call returns at most max_bytes (server-capped). Files larger "
-                "than the cap are NOT refused: read the first chunk (offset=0), then "
-                "if the result's end_of_file is false, keep calling with "
-                "offset=next_offset until end_of_file is true. The result reports "
-                "size (full file), offset, bytes, end_of_file and next_offset for "
-                "this iteration. Example for a large log: read(offset=0, max_bytes=20000) "
-                "-> offset=20000 -> offset=40000 ... until end_of_file=true."
+                f"Read ONE bounded slice of a remote text file inside {root}. "
+                "Each call returns at most min(max_bytes, server slice cap) bytes "
+                "starting at 'offset'. For large files, do NOT page from offset=0 "
+                "to EOF: first use hpc.files.search to locate the region of "
+                "interest, then read a small slice around it. The result reports "
+                "size (full file), offset, bytes, end_of_file and next_offset; "
+                "use next_offset only when you genuinely need the adjacent "
+                "region, never as part of an unguided full-file download."
             ),
             schema={
                 "type": "object",
                 "properties": {
                     "path": _str("path", abs_path),
-                    "max_bytes": _int("max_bytes", "Max bytes to return"),
+                    "max_bytes": _int("max_bytes", "Max bytes to return (server-capped)"),
                     "offset": _int("offset", "Byte offset to start from"),
                 },
                 "required": ["path"],
@@ -225,10 +249,60 @@ def build_tools(
         )
     )
 
+    async def files_search(args: dict) -> Any:
+        return await search_svc.search(
+            _str_arg(args, "path"),
+            _str_arg(args, "pattern"),
+            max_matches=_int_arg(args, "max_matches", minimum=0),
+            context_lines=_int_arg(args, "context_lines", minimum=0),
+            max_scan_bytes=_int_arg(args, "max_scan_bytes", minimum=0),
+            max_files=_int_arg(args, "max_files", minimum=0),
+            max_depth=_int_arg(args, "max_depth", minimum=1),
+            timeout=_int_arg(args, "timeout", minimum=1),
+        )
+
+    tools.append(
+        ToolDef(
+            name="hpc.files.search",
+            description=(
+                f"Search a remote file (or directory tree) inside {root} for a "
+                "regex pattern, with hard server-side budgets. Use this to "
+                "locate the region of interest in a log FIRST, then read a "
+                "small slice with hpc.files.read -- never page a whole log. "
+                "All of max_matches/context_lines/max_scan_bytes/max_files/"
+                "max_depth/timeout are clamped by the server; results report "
+                "truncated=true when a budget was hit."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "path": _str("path", abs_path),
+                    "pattern": _str("pattern", "Extended regex (POSIX ERE) pattern"),
+                    "max_matches": _int("max_matches", "Max matches to return (server-capped)"),
+                    "context_lines": _int("context_lines", "Lines of context around each match (server-capped)"),
+                    "max_scan_bytes": _int("max_scan_bytes", "Max bytes scanned for a single file (server-capped)"),
+                    "max_files": _int("max_files", "Max files scanned in a directory tree (approx, server-capped)"),
+                    "max_depth": _int("max_depth", "Directory tree depth limit (server-capped)"),
+                    "timeout": _int("timeout", "Max seconds for the remote search (server-capped)"),
+                },
+                "required": ["path", "pattern"],
+                "additionalProperties": False,
+            },
+            handler=files_search,
+            read_only=True,
+            idempotent=True,
+        )
+    )
+
     async def files_write(args: dict) -> Any:
-        path = _str_arg(args, "path")
-        content = _str_arg(args, "content")
-        return await files.write_file(path, content, append=_bool_arg(args, "append"))
+        return await files.write_file(
+            _str_arg(args, "path"),
+            _str_arg(args, "content"),
+            append=_bool_arg(args, "append"),
+            expected_size=_int_arg(args, "expected_size", minimum=0),
+            expected_mtime=_int_arg(args, "expected_mtime", minimum=0),
+            expected_sha256=args.get("expected_sha256"),
+        )
 
     tools.append(
         ToolDef(
@@ -237,7 +311,10 @@ def build_tools(
                 f"Write (or append to) a remote file inside {root}. Size-capped. "
                 "The result reports exactly what changed: change is 'created' (new "
                 "file), 'overwritten' (existing file replaced) or 'appended', with "
-                "existed_before, previous_size and new_size."
+                "existed_before, previous_size and new_size.\n"
+                "Optimistic concurrency: pass expected_size / expected_mtime / "
+                "expected_sha256 (from a previous hpc.files.read / stat) to refuse "
+                "overwriting a file that another process changed since you read it."
             ),
             schema={
                 "type": "object",
@@ -245,6 +322,9 @@ def build_tools(
                     "path": _str("path", abs_path),
                     "content": _str("content", "Text content to write"),
                     "append": {"type": "boolean", "default": False},
+                    "expected_size": _int("expected_size", "Expected current file size (bytes); mismatch denies the write"),
+                    "expected_mtime": _int("expected_mtime", "Expected current mtime (epoch seconds); mismatch denies the write"),
+                    "expected_sha256": _str("expected_sha256", "Expected current SHA-256 (64 hex chars); mismatch denies the write"),
                 },
                 "required": ["path", "content"],
                 "additionalProperties": False,
@@ -369,6 +449,70 @@ def build_tools(
     )
 
     # ---------------------------------------------------------------- slurm
+    async def job_run(args: dict) -> Any:
+        return await slurm.run(
+            runtime=_str_arg(args, "runtime"),
+            script=_str_arg(args, "script"),
+            args=args.get("args"),
+            working_directory=_str_arg(args, "working_directory", required=False) or root,
+            job_name=_str_arg(args, "job_name", required=False),
+            partition=_str_arg(args, "partition", required=False),
+            nodes=_int_arg(args, "nodes", minimum=1),
+            ntasks=_int_arg(args, "ntasks", minimum=1),
+            cpus_per_task=_int_arg(args, "cpus_per_task", minimum=1),
+            memory=args.get("memory"),
+            time_limit=_str_arg(args, "time_limit", required=False),
+            gpus=_int_arg(args, "gpus", minimum=0),
+            environment=args.get("environment"),
+        )
+
+    tools.append(
+        ToolDef(
+            name="hpc.job.run",
+            description=(
+                "High-level job submission from a trusted runtime profile "
+                "(julia/python/moose/bash). The server builds the argv from a "
+                "fixed profile table and then enforces the exact same Slurm "
+                "resource policy, path sandbox and job ownership as "
+                "hpc.slurm.submit -- it never bypasses any policy. Experts can "
+                "keep using hpc.slurm.submit for full argv control. moose "
+                "expects script=the binary and args like ['input.i']."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "runtime": {
+                        "type": "string",
+                        "enum": ["julia", "python", "moose", "bash", "shell"],
+                        "description": "Trusted runtime profile",
+                    },
+                    "script": _str("script", "Script path inside the user root"),
+                    "args": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Extra argv (required for moose: binary + input)",
+                    },
+                    "job_name": _str("job_name", "Short job name (default: runtime)"),
+                    "working_directory": _str(
+                        "working_directory", f"Job working directory inside {root} (default: {root})"
+                    ),
+                    "partition": _str("partition", f"Allowed partition (default: configured first)"),
+                    "nodes": _int("nodes", "Node count (default 1)"),
+                    "ntasks": _int("ntasks", "Task count (default 1)"),
+                    "cpus_per_task": _int("cpus_per_task", "CPUs per task (default 1)"),
+                    "memory": _str("memory", "Memory, e.g. '16G' (default: none)"),
+                    "time_limit": _str("time_limit", "Wall limit, e.g. '00:30:00'"),
+                    "gpus": _int("gpus", "GPU count (default 0)"),
+                    "environment": {"type": "object", "additionalProperties": {"type": "string"}},
+                },
+                "required": ["runtime", "script"],
+                "additionalProperties": False,
+            },
+            handler=job_run,
+            open_world=True,
+        )
+    )
+
     async def slurm_submit(args: dict) -> Any:
         command = args.get("command")
         if not isinstance(command, (str, list)):
@@ -568,6 +712,115 @@ def build_tools(
                 "additionalProperties": False,
             },
             handler=jobs_wait,
+            read_only=True,
+            idempotent=True,
+        )
+    )
+
+    async def jobs_diagnose(args: dict) -> Any:
+        return await slurm.diagnose(
+            _str_arg(args, "job_id"),
+            stdout_lines=_int_arg(args, "stdout_lines", minimum=0),
+            stderr_lines=_int_arg(args, "stderr_lines", minimum=0),
+            include_accounting=_bool_arg(args, "include_accounting", default=True),
+            include_error_scan=_bool_arg(args, "include_error_scan", default=True),
+        )
+
+    tools.append(
+        ToolDef(
+            name="hpc.jobs.diagnose",
+            description=(
+                "One-call diagnosis of a tracked job: current state, exit code, "
+                "accounting, bounded stdout/stderr tails and a hint scan for "
+                "common failure signatures (OOM, segfault, timeout, GPU/MPI "
+                "errors, missing files). Prefer this over sequencing "
+                "status + output + accounting + read yourself. All queries are "
+                "restricted to the given owned job and every tail is capped."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "job_id": _str("job_id", "Slurm job ID"),
+                    "stdout_lines": _int("stdout_lines", "Approx lines of stdout tail (capped)"),
+                    "stderr_lines": _int("stderr_lines", "Approx lines of stderr tail (capped)"),
+                    "include_accounting": {"type": "boolean", "default": True},
+                    "include_error_scan": {"type": "boolean", "default": True},
+                },
+                "required": ["job_id"],
+                "additionalProperties": False,
+            },
+            handler=jobs_diagnose,
+            read_only=True,
+        )
+    )
+
+    async def jobs_wait_and_diagnose(args: dict) -> Any:
+        return await slurm.wait_and_diagnose(
+            _str_arg(args, "job_id"),
+            timeout_seconds=_int_arg(args, "timeout_seconds", minimum=0),
+            poll_interval=_int_arg(args, "poll_interval", 10, minimum=1) or 10,
+            stdout_lines=_int_arg(args, "stdout_lines", minimum=0),
+            stderr_lines=_int_arg(args, "stderr_lines", minimum=0),
+        )
+
+    tools.append(
+        ToolDef(
+            name="hpc.jobs.wait_and_diagnose",
+            description=(
+                "Wait for a tracked job to finish, then run the full diagnosis "
+                "(state, exit code, accounting, bounded stdout/stderr tails, "
+                "error signatures) in the same call. Use this instead of "
+                "sequencing wait + status + output + accounting yourself. "
+                "Bounded by the server wait limit and tail caps."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "job_id": _str("job_id", "Slurm job ID"),
+                    "timeout_seconds": _int("timeout_seconds", "Max wait (capped by server config)"),
+                    "poll_interval": _int("poll_interval", "Seconds between polls", 10),
+                    "stdout_lines": _int("stdout_lines", "Approx lines of stdout tail (capped)"),
+                    "stderr_lines": _int("stderr_lines", "Approx lines of stderr tail (capped)"),
+                },
+                "required": ["job_id"],
+                "additionalProperties": False,
+            },
+            handler=jobs_wait_and_diagnose,
+            read_only=True,
+        )
+    )
+
+    async def project_snapshot(args: dict) -> Any:
+        return await projects_svc.snapshot(
+            _str_arg(args, "path"),
+            depth=_int_arg(args, "depth", minimum=1),
+            include_git=_bool_arg(args, "include_git", default=True),
+            include_jobs=_bool_arg(args, "include_jobs", default=True),
+        )
+
+    tools.append(
+        ToolDef(
+            name="hpc.project.snapshot",
+            description=(
+                f"One bounded call to establish project context inside {root}: a "
+                "shallow directory overview (depth-capped), sizes of interesting "
+                "source/log files, a read-only git status summary and the tracked "
+                "jobs of this project. Use this ONCE at the start instead of "
+                "sequencing list + read + git status + queue. The snapshot never "
+                "scans the whole project recursively."
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "path": _str("path", abs_path),
+                    "depth": _int("depth", "Directory depth to enumerate (clamped by server)"),
+                    "include_git": {"type": "boolean", "default": True},
+                    "include_jobs": {"type": "boolean", "default": True},
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+            handler=project_snapshot,
             read_only=True,
             idempotent=True,
         )

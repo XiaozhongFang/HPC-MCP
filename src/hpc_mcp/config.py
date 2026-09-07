@@ -120,6 +120,21 @@ class FilesConfig:
     max_read_bytes: int = DEFAULT_MAX_READ_BYTES
     max_write_bytes: int = DEFAULT_MAX_WRITE_BYTES
     max_list_entries: int = DEFAULT_MAX_LIST_ENTRIES
+    #: Per-call read *slice* cap (hpc.files.read).  A single read returns at
+    #: most this many bytes regardless of max_bytes, so a misbehaving agent
+    #: cannot page a whole multi-hundred-MB log to EOF in one conversation.
+    #: 0 disables the extra clamp (then max_read_bytes applies per call).
+    max_read_slice_bytes: int = 256 * 1024  # 256 KiB per read call
+    #: Hard ceiling for recursive listing depth (hpc.files.list recursive).
+    #: Recursive enumeration never descends beyond this many levels.
+    max_recursive_depth: int = 3
+    # -- hpc.files.search budgets (all server-clamped, fail-closed) -----------
+    search_max_matches: int = 200
+    search_max_context_lines: int = 10
+    search_max_scan_bytes: int = 64 * 1024 * 1024  # 64 MiB per single-file search
+    search_max_files: int = 1000
+    search_max_depth: int = 6
+    search_timeout: int = 5  # seconds, remote side
 
 
 @dataclass
@@ -134,6 +149,8 @@ class Config:
     wait_max_seconds: int = DEFAULT_WAIT_MAX_SECONDS
     log_file: str | None = None
     log_level: str = "INFO"
+    #: TTL (seconds) for the read-only query dedup cache.  0 disables caching.
+    cache_ttl_seconds: float = 2.0
     # Local directories that transfer tools may read/write.  Defaults to the
     # current working directory plus the system temp dir (TMPDIR or /tmp), so
     # quick local tests in /tmp work out of the box.
@@ -323,6 +340,7 @@ _KNOWN_KEYS: dict[str, frozenset[str]] = {
             "shell",
             "files",
             "wait_max_seconds",
+            "cache_ttl_seconds",
             "log_file",
             "log_level",
             # ssh.* settings may also be written at the top level
@@ -358,7 +376,14 @@ _KNOWN_KEYS: dict[str, frozenset[str]] = {
         }
     ),
     "shell": frozenset({"safe_commands", "max_exec_seconds", "max_output_bytes"}),
-    "files": frozenset({"max_read_bytes", "max_write_bytes", "max_list_entries"}),
+    "files": frozenset(
+        {
+            "max_read_bytes", "max_write_bytes", "max_list_entries", "max_read_slice_bytes",
+            "max_recursive_depth",
+            "search_max_matches", "search_max_context_lines", "search_max_scan_bytes",
+            "search_max_files", "search_max_depth", "search_timeout",
+        }
+    ),
 }
 
 
@@ -556,12 +581,61 @@ def build_config(cli_args: Any | None = None, environ: dict[str, str] | None = N
             _coalesce(_env_int("MAX_LIST_ENTRIES", env), files_file.get("max_list_entries"), default=DEFAULT_MAX_LIST_ENTRIES),
             "files.max_list_entries", maximum=1_000_000,
         ),
+        max_read_slice_bytes=_bounded_int(
+            _coalesce(
+                _env_int("MAX_READ_SLICE_BYTES", env), files_file.get("max_read_slice_bytes"),
+                default=256 * 1024,
+            ),
+            "files.max_read_slice_bytes", maximum=2**31 - 1,
+        ),
+        max_recursive_depth=_bounded_int(
+            _coalesce(
+                _env_int("MAX_RECURSIVE_DEPTH", env), files_file.get("max_recursive_depth"),
+                default=3,
+            ),
+            "files.max_recursive_depth", maximum=64,
+        ),
+        search_max_matches=_bounded_int(
+            _coalesce(_env_int("SEARCH_MAX_MATCHES", env), files_file.get("search_max_matches"), default=200),
+            "files.search_max_matches", maximum=100_000,
+        ),
+        search_max_context_lines=_bounded_int(
+            _coalesce(
+                _env_int("SEARCH_MAX_CONTEXT_LINES", env), files_file.get("search_max_context_lines"), default=10
+            ),
+            "files.search_max_context_lines", maximum=1000,
+        ),
+        search_max_scan_bytes=_bounded_int(
+            _coalesce(
+                _env_int("SEARCH_MAX_SCAN_BYTES", env), files_file.get("search_max_scan_bytes"),
+                default=64 * 1024 * 1024,
+            ),
+            "files.search_max_scan_bytes", maximum=2**31 - 1,
+        ),
+        search_max_files=_bounded_int(
+            _coalesce(_env_int("SEARCH_MAX_FILES", env), files_file.get("search_max_files"), default=1000),
+            "files.search_max_files", maximum=1_000_000,
+        ),
+        search_max_depth=_bounded_int(
+            _coalesce(_env_int("SEARCH_MAX_DEPTH", env), files_file.get("search_max_depth"), default=6),
+            "files.search_max_depth", maximum=64,
+        ),
+        search_timeout=_bounded_int(
+            _coalesce(_env_int("SEARCH_TIMEOUT", env), files_file.get("search_timeout"), default=5),
+            "files.search_timeout", maximum=3600,
+        ),
     )
     shell_cfg.max_exec_seconds = _bounded_int(shell_cfg.max_exec_seconds, "shell.max_exec_seconds", maximum=86400)
     shell_cfg.max_output_bytes = _bounded_int(shell_cfg.max_output_bytes, "shell.max_output_bytes", maximum=2**31 - 1)
 
     wait_max = _coalesce(_env_int("WAIT_MAX_SECONDS", env), file_data.get("wait_max_seconds"), default=DEFAULT_WAIT_MAX_SECONDS)
     wait_max = _bounded_int(wait_max, "wait_max_seconds", maximum=7 * 86400)
+
+    cache_ttl = _coalesce(
+        _env_int("CACHE_TTL_SECONDS", env), file_data.get("cache_ttl_seconds"), default=2.0
+    )
+    if isinstance(cache_ttl, bool) or not isinstance(cache_ttl, (int, float)) or cache_ttl < 0 or cache_ttl > 3600:
+        raise ConfigError(f"cache_ttl_seconds must be a number between 0 and 3600, got {cache_ttl!r}")
 
     log_file = _coalesce(cli.get("log_file"), _env("LOG_FILE", env), file_data.get("log_file"))
     if log_file:
@@ -609,6 +683,7 @@ def build_config(cli_args: Any | None = None, environ: dict[str, str] | None = N
         shell=shell_cfg,
         files=files,
         wait_max_seconds=int(wait_max),
+        cache_ttl_seconds=float(cache_ttl),
         log_file=log_file,
         log_level=str(log_level).upper(),
     )

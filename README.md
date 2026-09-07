@@ -74,6 +74,26 @@ export HPC_MCP_LOCAL_ROOT=$PWD       # 上传/下载允许访问的本地目录
 
 配置缺失、路径无法解析、命令解析失败、分区不确定、SSH 异常等任何不确定情况统一 **DENY**，绝不回退到无限制 shell。
 
+### 三层安全边界
+
+| 层 | 机制 | 防护目标 |
+|---|---|---|
+| Layer 1: MCP policy | 路径沙箱、命令白名单、Slurm 资源策略、作业归属、审计 | Agent 越权/乱来 |
+| Layer 2: Slurm | 分区白名单、资源上限、并发上限、`sbatch` 入口唯一 | 计算资源滥用 |
+| Layer 3: OS/集群 | 独立 Unix UID / 作业隔离 / filesystem ACL / 容器 | **恶意代码隔离**（可选） |
+
+> **残余风险（必须知晓）**：在共享 Unix UID 下，MCP 只能保证"Agent 不乱来"（Layer 1/2），**无法**保证提交到计算节点的恶意代码不访问同 UID 能访问的其他数据（Layer 3）。真正敌对的代码隔离需要独立 UID、Slurm 作业隔离 + filesystem ACL，或集群容器/沙箱。不要把 Python 侧的正则/策略当作对恶意代码的 OS 级隔离。
+
+### 查询成本与去重
+
+- `hpc.files.read` 是 **bounded slice**：单次最多 `min(max_bytes, files.max_read_slice_bytes)`（默认 256KiB）字节，不再引导 Agent 从 offset=0 读到 EOF。
+- `hpc.files.list` 递归列举**逐层分页**（`page_size` + `next_cursor`），远端 `head` 截断，绝不整树扫描后丢弃。
+- `hpc.files.search` 带硬预算（`max_matches`/`max_scan_bytes`/`max_files`/`max_depth`/`timeout`，全部服务端钳制），用于"先定位再精读"。
+- 只读幂等查询按 `tool+参数` 去重（TTL 默认 2 秒，`cache_ttl_seconds` 可调，0 禁用）；任何写操作主动失效缓存。
+- `hpc.slurm.queue/status` 只查本实例跟踪的 job ID（`squeue -j <ids>`），**绝不**扫描共享账号的全队列。
+- `hpc.shell.run_safe` 的所有命令（含白名单内合法命令）都有 **command cost 预算**：`find`/`du`/`sort`/`git grep` 等高风险命令被钳制在更短 timeout + 输出上限内。
+- 返回给 Agent 的内容（日志/文件内容）经**最小限度 secret 脱敏**（`password=`/`token=`/`Bearer`/AWS/PEM 私钥块等），与审计日志脱敏分开治理，不破坏科研日志。
+
 ## 安装
 
 详细安装流程见 [docs/QUICKSTART.md](docs/QUICKSTART.md)
@@ -221,19 +241,21 @@ reasonix mcp add hpc \
 两者都是 stdio argv 方式启动，无需 shell。注意手动方式里 `hpc-mcp` 若
 不在 PATH，需换成绝对路径（如 `/path/to/conda/envs/hpc-mcp/bin/hpc-mcp`）。
 
-## 工具清单（16 个）
+## 工具清单（21 个）
+
+### 低级原语
 
 | 工具 | 说明 | annotations |
 |---|---|---|
-| `hpc.info` | 连接/集群信息 | readOnly |
-| `hpc.files.list` | 列目录 | readOnly |
-| `hpc.files.read` | 读文件（大小受限） | readOnly |
-| `hpc.files.write` | 写文件 | destructive |
+| `hpc.info` | 连接/集群信息（本地路径不暴露） | readOnly |
+| `hpc.files.list` | 列目录（bounded 分页，recursive 逐层 + cursor） | readOnly |
+| `hpc.files.read` | 读文件（bounded slice，单次 ≤256KiB） | readOnly |
+| `hpc.files.write` | 写文件（支持 expected_size/mtime/hash 乐观并发保护） | destructive |
 | `hpc.files.mkdir` | 建目录 | — |
 | `hpc.files.delete` | 删除 | destructive |
 | `hpc.files.upload` | 本地上传（SFTP） | destructive |
 | `hpc.files.download` | 下载到本地（SFTP） | readOnly |
-| `hpc.shell.run_safe` | 白名单轻量命令 | readOnly |
+| `hpc.shell.run_safe` | 白名单轻量命令（带 command cost 预算） | readOnly |
 | `hpc.slurm.submit` | 提交计算作业 | openWorld |
 | `hpc.slurm.status` | 作业状态 | readOnly |
 | `hpc.slurm.queue` | 我的作业队列 | readOnly |
@@ -241,6 +263,16 @@ reasonix mcp add hpc \
 | `hpc.slurm.cancel` | 取消作业 | destructive |
 | `hpc.slurm.accounting` | sacct 记账 | readOnly |
 | `hpc.jobs.wait` | 等待作业完成（有上限） | readOnly |
+
+### 高阶 Agent 工具
+
+| 工具 | 说明 | annotations |
+|---|---|---|
+| `hpc.files.search` | 带预算的正则搜索（定位日志错误行） | readOnly |
+| `hpc.jobs.diagnose` | 一次完成状态+记账+日志尾部+错误签名诊断 | readOnly |
+| `hpc.jobs.wait_and_diagnose` | 等待作业结束并一次诊断 | readOnly |
+| `hpc.project.snapshot` | 一次建立项目上下文（目录概览+git+作业） | readOnly |
+| `hpc.job.run` | runtime profile 高阶提交（julia/python/moose/bash） | openWorld |
 
 ### 示例调用
 
@@ -286,9 +318,12 @@ hpc.slurm.submit
 
 ## 推荐工作流（Agent）
 
-1. 本地阅读/修改代码 → 2. 本地轻量检查 → 3. `hpc.files.upload` 同步 →
-4. `hpc.shell.run_safe` 做轻量查询 → 5. 编译/测试/计算一律 `hpc.slurm.submit` →
-6. `hpc.slurm.status` 轮询 → 7. `hpc.slurm.output` 取日志 → 8. 分析、修改、重复。
+1. `hpc.info` 了解环境 → 2. `hpc.project.snapshot` 一次建立项目上下文 →
+3. `hpc.files.search` 先定位（日志错误行等），再 `hpc.files.read` 读小段上下文 →
+4. `hpc.files.write` 远程编辑 → 5. 编译/测试/计算一律 `hpc.slurm.submit` →
+6. `hpc.jobs.diagnose` 一次诊断失败作业 → 7. 分析、修改、重复。
+
+原则：**能一次高阶调用完成的，不要拆成多次低级调用**；`hpc.files.read` 是 bounded slice，不要从 offset=0 读到 EOF；重复的只读查询由服务端 TTL 缓存去重。
 
 详见 [`skills/hpc-development/SKILL.md`](skills/hpc-development/SKILL.md)。
 

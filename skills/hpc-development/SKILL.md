@@ -19,11 +19,13 @@ description: 在远程 HPC 集群上安全地进行科研计算开发（Julia/MO
 
 **默认在远程工作，不要先把文件下载到本地再改。** 远程文件可以直接读（`hpc.files.read`）、直接写（`hpc.files.write`）、直接跑（`hpc.slurm.submit`）。只有本地有而远程没有的工具/环境、或需要本地人检查产出物时，才用 `download`。
 
-1. **了解环境**：`hpc.info` 查看 working_root、local_roots、可用分区与资源上限（注意：SSH host/user 不暴露，不要尝试获取或绕过 MCP 直连）。
-2. **查看项目**：`hpc.files.list` / `hpc.files.read` 直接读远程代码，`hpc.shell.run_safe` 做 `git diff`、`ls` 等轻量检查。
-   - **大文件分块读取**：`hpc.files.read` 每次最多返回 `max_bytes`（服务端限制），但**不会拒绝读取大文件**。读大文件用循环：先 `read(offset=0)`，若返回的 `end_of_file` 为 `false`，继续用返回的 `next_offset` 作为下次的 `offset`，直到 `end_of_file` 为 `true`。不要因文件大而下载到本地——分块读即可。
-3. **远程编辑**：`hpc.files.write`（或先 `read` 再 `write` 修改片段）直接在远程改代码；小改动不需要下载。
-4. **远程提交计算**：需要编译/测试/模拟时走 `hpc.slurm.submit`：
+1. **了解环境**：`hpc.info` 查看 working_root、可用分区与资源上限（注意：SSH host/user 与本地路径不暴露，不要尝试获取或绕过 MCP 直连）。
+2. **建立项目上下文**：用一次 `hpc.project.snapshot` 拿到目录概览、源码/日志文件大小、只读 git 状态和本项目已跟踪作业——不要用多次 `list`+`read`+`git status`+`queue` 拼出来。
+3. **先定位，再精读**：
+   - 日志/输出排查先 `hpc.files.search`（带预算的正则搜索，定位行号），再用 `hpc.files.read(offset=…)` 读**一小段上下文**。
+   - `hpc.files.read` 是 bounded slice：每次最多返回 `min(max_bytes, 服务端 slice 上限)` 字节。**不要**从 `offset=0` 无目的地一直读到 `end_of_file`——大文件用 search 定位后再读局部。
+4. **远程编辑**：`hpc.files.write`（或先 `read` 再 `write` 修改片段）直接在远程改代码；小改动不需要下载。
+5. **远程提交计算**：需要编译/测试/模拟时走 `hpc.slurm.submit`：
 
    ```json
    {
@@ -38,9 +40,36 @@ description: 在远程 HPC 集群上安全地进行科研计算开发（Julia/MO
 
    - `working_directory` 缺省 = 配置的用户根目录；`partition` 可用 `hpc.info` 查到的允许分区名指定（GPU 作业选 GPU 分区），缺省取配置的第一个；`cpus_per_task`/`nodes`/`ntasks`/`gpus`/`time_limit` 都有安全默认值，也可从所提交 `.sh` 脚本的 `#SBATCH` 指令读取。
    - 资源上限（CPU/节点/内存/GPU/时长/并发）由服务端强制，超限会被拒——先看 `hpc.info` 的限额再申请。
-5. **跟踪**：`hpc.slurm.status` 轮询，或 `hpc.jobs.wait` 等待（有上限）。
-6. **取日志**：`hpc.slurm.output`（stdout/stderr，尾部截取）；需要记账信息用 `hpc.slurm.accounting`。
-7. **分析失败 → 远程修改（步骤 3）→ 重复**，直到通过。
+6. **跟踪**：`hpc.slurm.status` 轮询，或 `hpc.jobs.wait` 等待（有上限）。**生产级**用 `hpc.jobs.wait_and_diagnose` 一次完成等待+诊断。
+7. **作业失败诊断**：直接用一次 `hpc.jobs.diagnose`（状态 + exit code + 记账 + stdout/stderr 尾部 + 常见错误签名扫描）。**不要**自己串联 `status → output → accounting → read`。
+8. **重复查询会被去重**：同一只读查询在 2 秒内重复调用直接命中缓存，不产生 SSH；但不要依赖它——**没有新证据就不要重复调用**。
+9. **分析失败 → 远程修改（步骤 4）→ 重复**，直到通过。
+
+### 高阶提交（可选）
+
+`hpc.job.run` 用 runtime profile 简化提交（julia/python/moose/bash），内部仍走全部 Slurm 策略：
+
+```json
+{
+  "tool": "hpc.job.run",
+  "arguments": {
+    "runtime": "julia",
+    "script": "scripts/run.jl",
+    "args": ["--grid", "128"],
+    "cpus_per_task": 8
+  }
+}
+```
+
+`hpc.slurm.submit` 保留给需要完整 argv 控制的专家。
+
+### 写保护
+
+`hpc.files.write` 支持 `expected_size` / `expected_mtime` / `expected_sha256`：如果文件在上次读取后被其他进程修改，写入会被拒绝。这对共享账号环境尤其重要——避免覆盖同伴刚修改的代码。
+
+### 响应脱敏
+
+返回的日志/文件内容中如有 `password=`、`token=`、`API_KEY=`、`Bearer`、AWS 凭证、PEM 私钥块等明显 secret，会被自动脱敏为 `[REDACTED]`。科研日志内容不受影响。
 
 ### 什么时候才下载到本地
 
@@ -75,3 +104,6 @@ description: 在远程 HPC 集群上安全地进行科研计算开发（Julia/MO
 - 申请资源要适度：CPU、内存、时长、GPU 都受服务端上限约束，超限会被拒；分区只能从 `hpc.info` 显示的允许列表中选择，指定白名单外的分区会被拒绝。
 - 同时运行的作业有并发上限；先 `hpc.slurm.queue` 看自己的作业。
 - 取消自己的作业用 `hpc.slurm.cancel`（只能取消本实例提交的）。
+- **搜索/读取有预算**：`hpc.files.search` 的 `max_matches`/`max_scan_bytes`/`timeout`、`hpc.files.read` 的单次 slice、`hpc.files.list` 的 `page_size`/`max_depth` 都由服务端钳制；超预算会返回 `truncated`——按提示缩小范围，不要重试更粗暴的查询。
+- **只查询自己的作业**：服务端只查本实例跟踪的 job ID，`hpc.slurm.queue` 返回空是正常的（你没有活跃作业），不代表集群空闲。
+- 每次远程命令都会消耗登录节点资源；能用一次高阶调用（`snapshot`/`diagnose`/`search`）完成的，不要拆成多次低级调用。

@@ -41,9 +41,21 @@ shell:
   max_output_bytes: 1048576
 
 files:
-  max_read_bytes: 1048576    # 1 MiB
+  max_read_bytes: 1048576    # 1 MiB（read 的最大上限）
+  max_read_slice_bytes: 262144  # 单次 hpc.files.read 返回上限（默认 256 KiB，bounded slice）
   max_write_bytes: 10485760  # 10 MiB
   max_list_entries: 2000
+  max_recursive_depth: 3     # hpc.files.list recursive 的深度上限
+  # hpc.files.search 预算（全部服务端钳制）
+  search_max_matches: 200
+  search_max_context_lines: 10
+  search_max_scan_bytes: 67108864   # 64 MiB
+  search_max_files: 1000
+  search_max_depth: 6
+  search_timeout: 5
+
+# 只读查询去重缓存 TTL（秒）；0 禁用
+cache_ttl_seconds: 2.0
 
 # wait_max_seconds: 3600
 # log_file: ~/.local/share/hpc-mcp/hpc-mcp.log

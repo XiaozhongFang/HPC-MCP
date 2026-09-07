@@ -14,17 +14,33 @@ from mcp.server.stdio import stdio_server
 import mcp.types as types
 
 from . import __version__
+from .cache import QueryCache
 from .config import Config
 from .errors import HpcMcpError
 from .filesystem.service import FileService
 from .filesystem.transfer import TransferService
 from .logging import AuditLogger, ToolTimer, get_logger, sanitize
+from .response_redactor import redact_response
 from .shell.safe_exec import SafeExec
 from .slurm.jobs import JobTracker
 from .slurm.manager import SlurmManager
 from .ssh.manager import SshManager
 from .ssh.sftp import SftpClient
 from .tools.registry import ToolDef, build_tools, validate_tool_args
+
+#: Tools whose response payload is scanned for obvious secrets before being
+#: returned to the agent (remote file content and job logs).
+_RESPONSE_REDACT_TOOLS = frozenset(
+    {
+        "hpc.files.read",
+        "hpc.files.search",
+        "hpc.slurm.output",
+        "hpc.shell.run_safe",
+        "hpc.jobs.diagnose",
+        "hpc.jobs.wait_and_diagnose",
+        "hpc.project.snapshot",
+    }
+)
 
 
 def _to_result(payload: Any) -> list[types.TextContent]:
@@ -38,6 +54,7 @@ def _to_result(payload: Any) -> list[types.TextContent]:
 def create_server(cfg: Config) -> tuple[Server, list[ToolDef]]:
     log = get_logger()
     audit = AuditLogger()
+    query_cache = QueryCache(ttl_seconds=cfg.cache_ttl_seconds)
 
     ssh = SshManager(cfg)
     sftp = SftpClient(cfg)
@@ -87,6 +104,16 @@ def create_server(cfg: Config) -> tuple[Server, list[ToolDef]]:
             audit.record(tool=name, decision="DENY", reason=exc.user_message, args=raw_args if isinstance(raw_args, dict) else None)
             return types.CallToolResult(content=_to_result(exc.user_message), isError=True)
         timer = ToolTimer()
+
+        # -- query cache: dedupe repeated idempotent read-only calls --------
+        cacheable = tool.read_only and tool.idempotent and query_cache.ttl_seconds > 0
+        cache_key = query_cache.key(name, args) if cacheable else None
+        if cache_key is not None:
+            cached = query_cache.get(cache_key)
+            if cached is not None:
+                audit.record(tool=name, decision="ALLOW", args=args, duration=0.0, note="cache hit")
+                return types.CallToolResult(content=_to_result(cached))
+
         try:
             with timer:
                 payload = await tool.handler(args)
@@ -102,8 +129,18 @@ def create_server(cfg: Config) -> tuple[Server, list[ToolDef]]:
                 ),
                 isError=True,
             )
+        if cache_key is not None:
+            query_cache.put(cache_key, payload)
+        # every mutation invalidates all cached reads so nothing goes stale
+        if tool.destructive or name in {"hpc.slurm.submit", "hpc.files.write", "hpc.files.upload", "hpc.files.delete"}:
+            query_cache.invalidate()
+        # Agent-response redaction: content-bearing tools may contain secrets
+        # in remote output (logs, file contents).  This is separate from audit
+        # redaction and only masks obvious secret patterns, never scientific
+        # log content.
+        response_payload = redact_response(payload) if name in _RESPONSE_REDACT_TOOLS else payload
         audit.record(tool=name, decision="ALLOW", args=args, duration=timer.duration)
-        return types.CallToolResult(content=_to_result(payload))
+        return types.CallToolResult(content=_to_result(response_payload))
 
     from mcp.server.lowlevel.server import HandlerEntry
 

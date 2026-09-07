@@ -62,6 +62,9 @@ class FakeSsh:
         if argv[0] == "tail":
             path = argv[-1]
             data = self.outputs.get(path, "")
+            cap = int(argv[argv.index("-c") + 1]) if "-c" in argv else None
+            if cap is not None:
+                data = data[-cap:]
             code = 0 if path in self.outputs else 1
             return RemoteResult(stdout=data.encode(), stderr=b"", exit_code=code)
         if argv[0] == "stat" and "%s" in argv[2]:
@@ -230,6 +233,56 @@ class TestSubmit:
 
 
 @pytest.mark.asyncio
+class TestJobRun:
+    def _mgr(self, ssh):
+        cfg = make_cfg()
+        return SlurmManager(cfg, ssh, JobTracker(cfg, ssh))
+
+    async def test_run_julia_builds_argv(self):
+        ssh = FakeSsh()
+        mgr = self._mgr(ssh)
+        res = await mgr.run(runtime="julia", script="scripts/run.jl", args=["--grid", "128"], cpus_per_task=8)
+        assert res["job_id"] == "424242"
+        rendered = ssh.submitted_scripts[0]
+        assert "julia --project=. scripts/run.jl --grid 128" in rendered
+        assert "#SBATCH --cpus-per-task=8" in rendered
+        # still tracked like a normal submit
+        assert ssh.register["424242"]["job_name"] == "julia"
+
+    async def test_run_moose_builds_mpirun(self):
+        ssh = FakeSsh()
+        mgr = self._mgr(ssh)
+        await mgr.run(runtime="moose", script="/path/moose-opt", args=["input.i"], ntasks=16)
+        rendered = ssh.submitted_scripts[0]
+        assert "mpirun -np 16 -- /path/moose-opt input.i" in rendered
+
+    async def test_run_unknown_runtime_denied(self):
+        ssh = FakeSsh()
+        mgr = self._mgr(ssh)
+        with pytest.raises(SlurmPolicyError, match="Unknown runtime"):
+            await mgr.run(runtime="matlab", script="x.m")
+
+    async def test_run_still_enforces_slurm_policy(self):
+        """hpc.job.run must not bypass the resource policy."""
+        ssh = FakeSsh()
+        mgr = self._mgr(ssh)
+        with pytest.raises(SlurmPolicyError, match="CPUs"):
+            await mgr.run(runtime="julia", script="a.jl", cpus_per_task=1024)
+
+    async def test_run_bad_partition_denied(self):
+        ssh = FakeSsh()
+        mgr = self._mgr(ssh)
+        with pytest.raises(SlurmPolicyError):
+            await mgr.run(runtime="julia", script="a.jl", partition="gpu-long")
+
+    async def test_run_bad_args_denied(self):
+        ssh = FakeSsh()
+        mgr = self._mgr(ssh)
+        with pytest.raises(SlurmPolicyError):
+            await mgr.run(runtime="julia", script="a.jl", args=["a\nb"])
+
+
+@pytest.mark.asyncio
 class TestOwnership:
     def _mgr(self, ssh):
         cfg = make_cfg()
@@ -285,3 +338,100 @@ class TestOwnership:
         ssh.states[res["job_id"]] = "COMPLETED"
         out = await mgr.wait(res["job_id"], timeout_seconds=5, poll_interval=2)
         assert out["state"] == "COMPLETED"
+
+
+@pytest.mark.asyncio
+class TestDiagnose:
+    def _mgr(self, ssh):
+        cfg = make_cfg()
+        return SlurmManager(cfg, ssh, JobTracker(cfg, ssh))
+
+    async def test_diagnose_foreign_job_denied(self):
+        ssh = FakeSsh()
+        with pytest.raises(SlurmPolicyError, match="not submitted"):
+            await self._mgr(ssh).diagnose("999")
+
+    async def test_diagnose_aggregates(self):
+        ssh = FakeSsh()
+        mgr = self._mgr(ssh)
+        res = await mgr.submit(job_name="t", working_directory=ROOT, command=["ls"])
+        jid = res["job_id"]
+        ssh.states[jid] = "FAILED"
+        ssh.outputs[f"{ROOT}/.hpc-mcp/jobs/{jid}/stdout.log"] = "some output\n"
+        ssh.outputs[f"{ROOT}/.hpc-mcp/jobs/{jid}/stderr.log"] = "ERROR: cannot allocate memory\nkilled process 123\n"
+        out = await mgr.diagnose(jid, stdout_lines=5, stderr_lines=5)
+        assert out["job"]["state"] == "FAILED"
+        assert out["accounting"] is not None
+        assert "some output" in out["stdout_tail"]["content"]
+        assert "cannot allocate memory" in out["stderr_tail"]["content"]
+        assert out["diagnostics"]["oom"] is True
+        assert out["diagnostics"]["segfault"] is False
+
+    async def test_diagnose_lines_capped(self):
+        ssh = FakeSsh()
+        mgr = self._mgr(ssh)
+        res = await mgr.submit(job_name="t", working_directory=ROOT, command=["ls"])
+        jid = res["job_id"]
+        ssh.states[jid] = "FAILED"
+        ssh.outputs[f"{ROOT}/.hpc-mcp/jobs/{jid}/stdout.log"] = "x" * 5 * 1024 * 1024
+        out = await mgr.diagnose(jid, stdout_lines=10 ** 9, stderr_lines=10 ** 9)
+        # both tails are bounded regardless of the absurd requested line count
+        assert out["stdout_tail"]["bytes"] <= 200 * 4096 + 4096
+        assert out["stderr_tail"]["bytes"] <= 200 * 4096 + 4096
+
+    async def test_diagnose_scan_negative_ok(self):
+        ssh = FakeSsh()
+        mgr = self._mgr(ssh)
+        res = await mgr.submit(job_name="t", working_directory=ROOT, command=["ls"])
+        jid = res["job_id"]
+        ssh.states[jid] = "COMPLETED"
+        ssh.outputs[f"{ROOT}/.hpc-mcp/jobs/{jid}/stdout.log"] = "all good\n"
+        ssh.outputs[f"{ROOT}/.hpc-mcp/jobs/{jid}/stderr.log"] = ""
+        out = await mgr.diagnose(jid)
+        assert all(out["diagnostics"][k] is False for k in ("oom", "segfault", "timeout", "gpu_error", "mpi_error", "missing_file"))
+
+    async def test_wait_and_diagnose_foreign_denied(self):
+        ssh = FakeSsh()
+        with pytest.raises(SlurmPolicyError, match="not submitted"):
+            await self._mgr(ssh).wait_and_diagnose("999", timeout_seconds=5, poll_interval=2)
+
+    async def test_wait_and_diagnose_aggregates(self):
+        """wait_and_diagnose = wait until terminal + full diagnosis in one call."""
+        ssh = FakeSsh()
+        mgr = self._mgr(ssh)
+        res = await mgr.submit(job_name="t", working_directory=ROOT, command=["ls"])
+        jid = res["job_id"]
+        ssh.states[jid] = "FAILED"
+        ssh.outputs[f"{ROOT}/.hpc-mcp/jobs/{jid}/stdout.log"] = "partial\n"
+        ssh.outputs[f"{ROOT}/.hpc-mcp/jobs/{jid}/stderr.log"] = "Segmentation fault\n"
+        out = await mgr.wait_and_diagnose(jid, timeout_seconds=5, poll_interval=2)
+        assert out["waited_seconds"] == 0.0  # already terminal
+        assert out["job"]["state"] == "FAILED"
+        assert out["diagnostics"]["segfault"] is True
+        assert "partial" in out["stdout_tail"]["content"]
+
+    async def test_wait_and_diagnose_waits_then_diagnoses(self):
+        ssh = FakeSsh()
+        mgr = self._mgr(ssh)
+        res = await mgr.submit(job_name="t", working_directory=ROOT, command=["ls"])
+        jid = res["job_id"]
+        ssh.states[jid] = "COMPLETED"  # real FakeSsh state once we stop spying
+
+        calls = {"n": 0}
+
+        async def status_spy(job_id, **_):
+            # first status call sees PENDING (wait loop continues), then the
+            # real status() is used so diagnose's internal queries work
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"job_id": job_id, "state": "PENDING", "source": "squeue"}
+            return await original_status(job_id)
+
+        original_status = mgr.status
+        mgr.status = status_spy  # type: ignore[method-assign]
+        ssh.outputs[f"{ROOT}/.hpc-mcp/jobs/{jid}/stdout.log"] = "done\n"
+        ssh.outputs[f"{ROOT}/.hpc-mcp/jobs/{jid}/stderr.log"] = ""
+        out = await mgr.wait_and_diagnose(jid, timeout_seconds=5, poll_interval=1)
+        assert calls["n"] >= 2  # wait loop polled at least once
+        assert out["job"]["state"] == "COMPLETED"
+        assert "done" in out["stdout_tail"]["content"]

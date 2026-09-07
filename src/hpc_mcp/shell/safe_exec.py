@@ -13,6 +13,7 @@ import posixpath
 
 from ..config import Config
 from ..errors import CommandPolicyError
+from ..security.command_cost import clamp_output, clamp_timeout, tier_for
 from ..security.command_policy import check_command
 from ..security.path_policy import is_within, validate_path
 from ..ssh.manager import SshManager
@@ -74,8 +75,10 @@ class SafeExec:
             timeout = cfg.shell.max_exec_seconds
         if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
             raise CommandPolicyError("timeout must be a positive integer", requested=str(timeout))
-        timeout = min(timeout, cfg.shell.max_exec_seconds)
-        max_out = cfg.shell.max_output_bytes
+        # Command cost policy: even legal commands get a hard time/output budget.
+        tier = tier_for(argv)
+        timeout = clamp_timeout(tier, timeout, cfg.shell.max_exec_seconds)
+        max_out = clamp_output(tier, cfg.shell.max_output_bytes)
 
         # Do not inherit account-level variables such as LD_PRELOAD,
         # BASH_ENV, GIT_EXTERNAL_DIFF, or credential tokens.  Git config is
@@ -97,6 +100,8 @@ class SafeExec:
             "exit_code": res.exit_code,
             "stdout": res.stdout_text,
             "stderr": res.stderr_text,
+            "cost_tier": tier.name,
+            "timeout_seconds": timeout,
         }
         if res.exit_code == 124:
             result["timed_out"] = True

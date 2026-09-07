@@ -22,6 +22,7 @@ class FakeSsh:
     def __init__(self):
         self.realpath_map: dict[str, str] = {}
         self.file_sizes: dict[str, int] = {}
+        self.file_mtimes: dict[str, int] = {}
         self.file_data: dict[str, bytes] = {}
         self.commands: list[list[str]] = []
 
@@ -38,6 +39,18 @@ class FakeSsh:
                     return RemoteResult(stdout=b"", stderr=b"stat: no such file", exit_code=1)
                 size = self.file_sizes.get(path, 0)
                 return RemoteResult(stdout=str(size).encode(), stderr=b"", exit_code=0)
+            if argv[2] == "%s|%Y":
+                if path not in self.file_sizes:
+                    return RemoteResult(stdout=b"", stderr=b"stat: no such file", exit_code=1)
+                size = self.file_sizes.get(path, 0)
+                mtime = self.file_mtimes.get(path, 1700000000)
+                return RemoteResult(stdout=f"{size}|{mtime}".encode(), stderr=b"", exit_code=0)
+        if argv[0] == "sha256sum":
+            import hashlib as _hashlib
+
+            data = self.file_data.get(argv[-1], b"")
+            digest = _hashlib.sha256(data).hexdigest()
+            return RemoteResult(stdout=f"{digest}  {argv[-1]}\n".encode(), stderr=b"", exit_code=0)
         if argv[0] == "stat" and "%F" in argv[2]:
             return RemoteResult(stdout=b"regular file|10|644|u|g|1700000000", stderr=b"", exit_code=0)
         if argv[0] == "sh" and "base64" in argv[-1]:
@@ -132,7 +145,7 @@ class TestReadSandbox:
         data = b"abcdefghij" * 300  # 3000 bytes
         ssh.file_sizes[big] = len(data)
         ssh.file_data[big] = data
-        # 分块读完全部
+        # 分块读完全部（底层能力仍在，只是不再被工具描述引导）
         offset = 0
         chunks = []
         while True:
@@ -143,6 +156,135 @@ class TestReadSandbox:
             offset = out["next_offset"]
         assert "".join(chunks) == data.decode()
         assert len(chunks) == 3
+
+    async def test_read_respects_slice_budget(self):
+        """hpc.files.read is a bounded slice: a huge max_bytes is clamped to
+        the configured slice cap so a large file is not read in one call."""
+        ssh = FakeSsh()
+        fs = FileService(make_cfg(), ssh)
+        big = ROOT + "/big.log"
+        data = b"x" * (1024 * 1024)
+        ssh.file_sizes[big] = len(data)
+        ssh.file_data[big] = data
+        # max_bytes far above the 256 KiB slice budget
+        out = await fs.read_file(big, max_bytes=1024 * 1024)
+        assert out["bytes"] <= 256 * 1024
+        assert out["end_of_file"] is False
+        assert out["next_offset"] is not None
+
+    async def test_read_slice_budget_configurable(self):
+        cfg = make_cfg()
+        cfg.files.max_read_slice_bytes = 128
+        ssh = FakeSsh()
+        fs = FileService(cfg, ssh)
+        big = ROOT + "/big.log"
+        data = b"y" * 1000
+        ssh.file_sizes[big] = len(data)
+        ssh.file_data[big] = data
+        out = await fs.read_file(big, max_bytes=100000)
+        assert out["bytes"] == 128
+
+
+@pytest.mark.asyncio
+class TestListPaging:
+    """hpc.files.list must bound output on the remote side and support
+    cursor-based continuation for recursive listings."""
+
+    ROOT_DIR = ROOT + "/project"
+
+    class FakeListSsh:
+        def __init__(self, layers: dict[int, list[str]]):
+            """layers: depth -> list of 'type size path' lines."""
+            self.layers = layers
+            self.find_calls: list[list[str]] = []
+
+        async def realpath(self, path):
+            return path
+
+        async def run(self, argv, *, timeout=None, max_output=4 * 1024 * 1024, check=True):
+            self.find_calls.append(list(argv))
+            if argv[0] == "bash" and "find" in argv[-1]:
+                import re as _re
+
+                m = _re.search(r"-mindepth (\d+) -maxdepth (\d+)", argv[-1])
+                depth = int(m.group(1))
+                head_m = _re.search(r"head -n (\d+)", argv[-1])
+                limit = int(head_m.group(1)) if head_m else 10**9
+                lines = self.layers.get(depth, [])
+                cut = len(lines) > limit
+                out_lines = lines[:limit]
+                code = 141 if cut else 0  # pipefail: find killed by SIGPIPE
+                return RemoteResult(
+                    stdout=("\n".join(out_lines) + "\n").encode(),
+                    stderr=b"",
+                    exit_code=code,
+                )
+            return RemoteResult(stdout=b"", stderr=b"", exit_code=0)
+
+        async def run_raw(self, cmd, **kw):
+            return RemoteResult(stdout=b"", stderr=b"", exit_code=0)
+
+    def _lines(self, depth: int, base: str) -> list[str]:
+        prefix = "/".join([self.ROOT_DIR] + ["d" + str(depth)] * (depth - 1))
+        return [f"f {100 + i} {prefix}/file{i}.jl" for i in range(3)]
+
+    async def test_non_recursive_returns_dict(self):
+        ssh = self.FakeListSsh({1: self._lines(1, self.ROOT_DIR)})
+        fs = FileService(make_cfg(), ssh)
+        out = await fs.list_dir(self.ROOT_DIR)
+        assert isinstance(out, dict)
+        assert out["next_cursor"] is None
+        assert len(out["entries"]) == 3
+
+    async def test_non_recursive_page_truncated_remotely(self):
+        """A huge single layer must not stream back more than page_size."""
+        big_layer = [f"f {100 + i} {self.ROOT_DIR}/file{i}.jl" for i in range(5000)]
+        ssh = self.FakeListSsh({1: big_layer})
+        fs = FileService(make_cfg(), ssh)
+        out = await fs.list_dir(self.ROOT_DIR, page_size=50)
+        assert len(out["entries"]) == 50
+        assert out["truncated"] is True
+        # the remote command cut output with head -n 50
+        assert any("head -n 50" in c[-1] for c in ssh.find_calls)
+
+    async def test_recursive_pages_by_depth_with_cursor(self):
+        ssh = self.FakeListSsh(
+            {
+                1: self._lines(1, self.ROOT_DIR),
+                2: self._lines(2, self.ROOT_DIR),
+                3: self._lines(3, self.ROOT_DIR),
+            }
+        )
+        fs = FileService(make_cfg(), ssh)
+        page1 = await fs.list_dir(self.ROOT_DIR, recursive=True, page_size=3)
+        assert len(page1["entries"]) == 3
+        assert page1["truncated"] is True
+        assert page1["next_cursor"] == "depth:2"
+
+        page2 = await fs.list_dir(self.ROOT_DIR, recursive=True, page_size=3, cursor=page1["next_cursor"])
+        assert page2["next_cursor"] == "depth:3"
+        # depth 1 was NOT re-scanned
+        assert all("mindepth 1" not in c[-1] for c in ssh.find_calls[1:])
+
+        page3 = await fs.list_dir(self.ROOT_DIR, recursive=True, page_size=3, cursor=page2["next_cursor"])
+        assert page3["next_cursor"] is None
+        assert page3["truncated"] is False
+        assert len(page3["entries"]) == 3
+
+    async def test_recursive_respects_max_depth(self):
+        ssh = self.FakeListSsh({1: self._lines(1, self.ROOT_DIR), 2: self._lines(2, self.ROOT_DIR)})
+        fs = FileService(make_cfg(), ssh)
+        out = await fs.list_dir(self.ROOT_DIR, recursive=True, page_size=100, max_depth=1)
+        assert out["depth_reached"] == 1
+        assert all("maxdepth 1" in c[-1] for c in ssh.find_calls)
+        assert len(out["entries"]) == 3
+
+    async def test_invalid_cursor_denied(self):
+        fs = FileService(make_cfg(), self.FakeListSsh({1: []}))
+        with pytest.raises(PathSandboxError):
+            await fs.list_dir(self.ROOT_DIR, recursive=True, cursor="../../etc")
+        with pytest.raises(PathSandboxError):
+            await fs.list_dir(self.ROOT_DIR, recursive=True, cursor="depth:999")
 
 
 @pytest.mark.asyncio
@@ -183,6 +325,69 @@ class TestWriteSandbox:
         assert out["existed_before"] is True
         assert out["previous_size"] == 10
         assert out["new_size"] == 2
+
+
+@pytest.mark.asyncio
+class TestWriteConcurrency:
+    """Optimistic concurrency: refuse overwriting a file that changed since
+    the agent last read it (expected_size/expected_mtime/expected_sha256)."""
+
+    PATH = ROOT + "/project/data.txt"
+
+    async def test_expected_size_mismatch_denied(self):
+        ssh = FakeSsh()
+        fs = FileService(make_cfg(), ssh)
+        ssh.file_sizes[self.PATH] = 100
+        with pytest.raises(PathSandboxError, match="changed since"):
+            await fs.write_file(self.PATH, "new", expected_size=50)
+
+    async def test_expected_size_match_allowed(self):
+        ssh = FakeSsh()
+        fs = FileService(make_cfg(), ssh)
+        ssh.file_sizes[self.PATH] = 100
+        out = await fs.write_file(self.PATH, "new", expected_size=100)
+        assert out["change"] == "overwritten"
+
+    async def test_expected_mtime_mismatch_denied(self):
+        ssh = FakeSsh()
+        fs = FileService(make_cfg(), ssh)
+        ssh.file_sizes[self.PATH] = 100
+        ssh.file_mtimes[self.PATH] = 1700000000
+        with pytest.raises(PathSandboxError, match="changed since"):
+            await fs.write_file(self.PATH, "new", expected_mtime=1111111111)
+
+    async def test_expected_sha256_mismatch_denied(self):
+        ssh = FakeSsh()
+        fs = FileService(make_cfg(), ssh)
+        ssh.file_sizes[self.PATH] = 100
+        ssh.file_data[self.PATH] = b"original content"
+        with pytest.raises(PathSandboxError, match="hash does not match"):
+            await fs.write_file(self.PATH, "new", expected_sha256="0" * 64)
+
+    async def test_expected_sha256_match_allowed(self):
+        import hashlib as _hashlib
+
+        ssh = FakeSsh()
+        fs = FileService(make_cfg(), ssh)
+        data = b"original content"
+        ssh.file_sizes[self.PATH] = len(data)
+        ssh.file_data[self.PATH] = data
+        digest = _hashlib.sha256(data).hexdigest()
+        out = await fs.write_file(self.PATH, "new", expected_sha256=digest)
+        assert out["change"] == "overwritten"
+
+    async def test_expectation_on_missing_file_denied(self):
+        ssh = FakeSsh()
+        fs = FileService(make_cfg(), ssh)
+        with pytest.raises(PathSandboxError, match="no longer exists"):
+            await fs.write_file(self.PATH, "new", expected_size=10)
+
+    async def test_bad_sha256_format_denied(self):
+        ssh = FakeSsh()
+        fs = FileService(make_cfg(), ssh)
+        ssh.file_sizes[self.PATH] = 10
+        with pytest.raises(PathSandboxError):
+            await fs.write_file(self.PATH, "new", expected_sha256="not-a-hash")
 
 
 @pytest.mark.asyncio

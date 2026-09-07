@@ -42,10 +42,22 @@ HPC-MCP 的安全模型：**所有关键边界由 MCP Server 的确定性代码�
 ### 4. 作业归属隔离
 
 - 仅可管理当前服务会话提交并登记的 job（tracked_jobs.json 中的 `tool_session` 必须匹配）；重启后的旧会话作业默认不可由新实例接管。
+- **查询隔离**：`hpc.slurm.queue/status` 只对本实例跟踪的 job ID 执行 `squeue -j <ids>`；没有跟踪作业时直接返回空，**绝不**发出全账号 `squeue`/`sacct`——共享账号下其他使用者的作业元数据不会进入本进程。
 - 不得查看/取消其他使用者或他实例的作业。
 - 该登记文件是应用层隔离，不是同一 Unix UID 下的强制访问控制；敌对共享账号必须使用独立 UID 或特权远端辅助服务。
 
-### 5. SSH 边界
+### 5. 查询成本边界（诊断工具与预算）
+
+- `hpc.files.read` 是 **bounded slice**：单次读取 ≤ `min(max_bytes, files.max_read_slice_bytes)`（默认 256 KiB）；工具描述不引导 Agent 从 offset=0 读到 EOF（大文件排查用 `hpc.files.search` 定位）。
+- `hpc.files.search` 所有预算（`max_matches`/`max_context_lines`/`max_scan_bytes`/`max_files`/`max_depth`/`timeout`）服务端钳制；单文件先 `stat` 拒绝超预算文件；远端 `grep -m` + `head` 截断 + `timeout` 兜底；pattern 经 shlex 引用、拒绝控制字符，杜绝注入。
+- `hpc.files.list` 递归列举逐层分页（`page_size` + `depth:N` cursor），远端 `head` 截断输出，`bash -o pipefail` 识别 SIGPIPE 精确判定截断；绝不整树扫描后丢弃。
+- `hpc.jobs.diagnose` / `hpc.project.snapshot` 所有内部查询受限且带预算。
+- 只读幂等查询按 `tool + 规范化参数` 去重（`cache_ttl_seconds`，默认 2s，0 禁用）；任何写操作主动失效缓存。
+- `hpc.info` 不返回本地路径根（可能含用户名/项目名），仅返回能力布尔与资源上限。
+- `hpc.shell.run_safe` 所有合法命令受 **command cost policy** 分层钳制：`ls`/`head`/`pwd` 等 LOW 层（15s/256KiB），`grep`/`cat`/`git diff` 等 MEDIUM 层（30s/512KiB），`find`/`du`/`sort`/`git grep` 等 HIGH 层（10s/512KiB）。timeout 与 output 均由服务端强制，不依赖 Agent 自觉。
+- `hpc.files.write` 支持 **乐观并发保护**：`expected_size`/`expected_mtime`/`expected_sha256` 任一不匹配当前文件状态即拒绝覆盖（fail-closed），防止共享账号下覆盖同伴刚修改的代码。
+
+### 6. SSH 边界
 
 - 只允许连接配置的单一 host；BatchMode、StrictHostKeyChecking、连接超时。
 - **不读取、不输出私钥内容**；推荐 `~/.ssh/config` 管理。
@@ -58,6 +70,16 @@ HPC-MCP 的安全模型：**所有关键边界由 MCP Server 的确定性代码�
 - 私钥、密码、token 永不写日志；审计日志对敏感模式脱敏并截断。
 - 审计字段：timestamp、tool、args（脱敏）、decision(ALLOW/DENY)、reason、job_id、duration。
 - 脱敏按字段名递归处理（password/token/secret/private-key 等），并清除控制字符后截断；未知异常不会原样返回给 Agent。
+
+## 三层安全边界与残余风险
+
+| 层 | 机制 | 防护目标 |
+|---|---|---|
+| Layer 1: MCP policy | 路径沙箱、命令白名单、Slurm 资源策略、作业归属、查询预算、审计 | Agent 越权/乱来 |
+| Layer 2: Slurm | 分区白名单、资源上限、并发上限、`sbatch` 入口唯一 | 计算资源滥用 |
+| Layer 3: OS/集群 | 独立 Unix UID / Slurm 作业隔离 + filesystem ACL / 容器沙箱 / 特权远端辅助服务 | **恶意代码隔离**（可选） |
+
+**残余风险**：共享 Unix UID 下，MCP 只能保证"Agent 不乱来"（Layer 1/2），**无法**保证提交到计算节点的恶意代码不访问同 UID 可读的数据（Layer 3）。`hpc.slurm.submit` 本质是"以该 Unix UID 执行程序"。不要用 Python 正则/策略去"筛掉恶意代码"——那会产生虚假的安全感；真正的恶意代码隔离必须依赖 Layer 3 的 OS 级机制。在 README / QUICKSTART 中均需向使用者明确这一点。
 
 ## 明确不实现（v1）
 
