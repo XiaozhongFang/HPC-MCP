@@ -131,7 +131,8 @@ export HPC_MCP_MAX_TIME=24:00:00
 
 ### YAML 配置文件
 
-见 [`config/example.yaml`](config/example.yaml)：
+完整参数说明见 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)（所有支持的键、
+默认值、取值范围、对应环境变量）；这里是常用最小配置：
 
 ```yaml
 host: my-hpc
@@ -143,7 +144,10 @@ slurm:
   allowed_partitions: [compute]
   max_cpus: 64
   max_nodes: 2
+  max_memory_mb: 262144      # 256 GiB
+  max_gpus: 4
   max_time: "24:00:00"
+  max_concurrent_jobs: 20    # 同时活跃作业上限（默认 20，可调）
 ```
 
 ```bash

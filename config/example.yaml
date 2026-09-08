@@ -32,6 +32,7 @@ slurm:
   max_gpus: 4
   # Slurm 时长格式：HH:MM:SS、D-HH:MM:SS；天数可溢出如 "2-24:00:00"（=3 天）
   max_time: "24:00:00"
+  # 同时活跃的最大作业数：达到上限时新提交被拒，已结束的作业自动释放名额
   max_concurrent_jobs: 20
 
 shell:

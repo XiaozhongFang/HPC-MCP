@@ -48,9 +48,9 @@ class FakeSsh:
             lines = [f"{jid} {st}" for jid, st in self.states.items()]
             return RemoteResult(stdout=("\n".join(lines)).encode(), stderr=b"", exit_code=0)
         if argv[0] == "sacct":
-            jid = argv[2]
-            st = self.states.get(jid, "COMPLETED")
-            return RemoteResult(stdout=f"{jid}|{st}|0:0\n".encode(), stderr=b"", exit_code=0)
+            jids = argv[2].split(",")
+            out = "".join(f"{j}|{self.states.get(j, 'COMPLETED')}|0:0\n" for j in jids)
+            return RemoteResult(stdout=out.encode(), stderr=b"", exit_code=0)
         if argv[0] == "scancel":
             self.states[argv[-1]] = "CANCELLED"
             return RemoteResult(stdout=b"", stderr=b"", exit_code=0)
@@ -83,7 +83,9 @@ class FakeSsh:
         if "sbatch" in cmd:
             self.submitted_scripts.append(stdin_text or "")
             self.states[self.next_job_id] = "PENDING"
-            return RemoteResult(stdout=(self.next_job_id + "\n").encode(), stderr=b"", exit_code=0)
+            jid = self.next_job_id
+            self.next_job_id = str(int(self.next_job_id) + 1)
+            return RemoteResult(stdout=(jid + "\n").encode(), stderr=b"", exit_code=0)
         return RemoteResult(stdout=b"", stderr=b"", exit_code=0)
 
 
@@ -338,6 +340,43 @@ class TestOwnership:
         ssh.states[res["job_id"]] = "COMPLETED"
         out = await mgr.wait(res["job_id"], timeout_seconds=5, poll_interval=2)
         assert out["state"] == "COMPLETED"
+
+
+@pytest.mark.asyncio
+class TestConcurrencyCounting:
+    """count_active must not count finished jobs that left the squeue."""
+
+    def _mgr(self, ssh):
+        cfg = make_cfg()
+        cfg.slurm.max_concurrent_jobs = 2
+        return SlurmManager(cfg, ssh, JobTracker(cfg, ssh))
+
+    async def test_finished_job_not_counted_active(self):
+        """squeue no longer returns the job, but sacct says COMPLETED."""
+        ssh = FakeSsh()
+        mgr = self._mgr(ssh)
+        await mgr.submit(job_name="old", working_directory=ROOT, command=["ls"])
+        # job finished: it disappears from squeue, sacct keeps the terminal state
+        ssh.states.clear()
+        active = await mgr._tracker.count_active(await mgr._queue_states())
+        assert active == 0
+
+    async def test_full_quota_denies_new_submit_with_guidance(self):
+        """20/20 with no queue must not happen: finished jobs free the quota."""
+        ssh = FakeSsh()
+        mgr = self._mgr(ssh)
+        # two RUNNING jobs fill the quota of 2
+        r1 = await mgr.submit(job_name="a", working_directory=ROOT, command=["ls"])
+        r2 = await mgr.submit(job_name="b", working_directory=ROOT, command=["ls"])
+        ssh.states[r1["job_id"]] = "RUNNING"
+        ssh.states[r2["job_id"]] = "RUNNING"
+        with pytest.raises(SlurmPolicyError, match="Too many active jobs"):
+            await mgr.submit(job_name="c", working_directory=ROOT, command=["ls"])
+        # one finishes and leaves the queue; the tracking entry still exists,
+        # but sacct (default COMPLETED for unknown ids) frees the quota
+        ssh.states.pop(r1["job_id"])
+        res = await mgr.submit(job_name="d", working_directory=ROOT, command=["ls"])
+        assert res["job_id"]
 
 
 @pytest.mark.asyncio

@@ -67,9 +67,9 @@ class FakeSsh:
             lines = [f"{jid} {st}" for jid, st in self.states.items()]
             return RemoteResult(stdout=("\n".join(lines)).encode(), stderr=b"", exit_code=0)
         if argv[0] == "sacct":
-            jid = argv[2]
-            st = self.states.get(jid, "COMPLETED")
-            return RemoteResult(stdout=f"{jid}|{st}|0:0\n".encode(), stderr=b"", exit_code=0)
+            jids = argv[2].split(",")
+            out = "".join(f"{j}|{self.states.get(j, 'COMPLETED')}|0:0\n" for j in jids)
+            return RemoteResult(stdout=out.encode(), stderr=b"", exit_code=0)
         if argv[0] == "scancel":
             self.states[argv[-1]] = "CANCELLED"
             return RemoteResult(stdout=b"", stderr=b"", exit_code=0)

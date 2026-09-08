@@ -185,12 +185,37 @@ class JobTracker:
         )
 
     async def count_active(self, states_by_id: dict[str, str]) -> int:
-        """Count tracked jobs still in a non-terminal state."""
+        """Count tracked jobs still in a non-terminal state.
+
+        squeue drops jobs as soon as they finish, so an entry missing from
+        the squeue snapshot cannot be assumed active.  Such entries are
+        re-checked against ``sacct`` (tracked ids only, never a whole-account
+        scan); a terminal sacct state frees the quota even though the job is
+        still registered.  Only jobs that neither squeue nor sacct account
+        for stay counted as active, which is fail-closed for a just-submitted
+        job that has not appeared in accounting yet.
+        """
         terminal = {
             "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
             "NODE_FAIL", "PREEMPTED", "DEADLINE", "BOOT_FAIL", "REVOKED", "SPECIAL_EXIT",
         }
         data = {entry["job_id"]: entry for entry in await self.list_mine()}
+        unresolved = [
+            jid
+            for jid in data
+            if states_by_id.get(jid, "UNKNOWN").split("+", 1)[0].strip() not in terminal
+        ]
+        if unresolved:
+            res = await self._ssh.run(
+                ["sacct", "-j", ",".join(unresolved), "--format=JobID,State", "-n", "-P", "-X"],
+                check=False,
+            )
+            for line in res.stdout_text.splitlines():
+                parts = line.split("|")
+                if len(parts) >= 2 and parts[0].isdigit():
+                    st = parts[1].split("+", 1)[0].strip()
+                    if st in terminal:
+                        states_by_id[parts[0]] = st
         active = 0
         for jid in data:
             st = states_by_id.get(jid, "UNKNOWN").split("+", 1)[0].strip()
