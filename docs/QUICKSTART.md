@@ -255,12 +255,17 @@ hpc-mcp --config ~/.config/hpc-mcp/192.168.12.12.yaml --check
 codex mcp add hpc \
   --env HPC_MCP_HOST=192.168.12.12 \
   --env HPC_MCP_USER=username \
-  --env HPC_MCP_ROOT=/home/username/alice \
+  --env HPC_MCP_ROOT=/home/username/alice/yourhome \
   --env HPC_MCP_LOCAL_ROOT=/home/alice \
-  --env HPC_MCP_ALLOWED_PARTITIONS=thcp1 \
+  --env HPC_MCP_ALLOWED_PARTITIONS=compute,debug \
   --env HPC_MCP_SSH_BIN=/mnt/c/Windows/System32/OpenSSH/ssh.exe \
   --env HPC_MCP_SFTP_BIN=/mnt/c/Windows/System32/OpenSSH/sftp.exe \
-  -- hpc-mcp
+  --env HPC_MCP_PORT=22 \
+  --env HPC_MCP_LOG_FILE=/home/alice/.local/share/hpc-mcp/hpc-mcp.log \
+  --env HPC_MCP_LOG_LEVEL=INFO \
+  -- \
+  /home/alice/venvs/hpc-mcp/bin/hpc-mcp \
+  --config /home/alice/.config/hpc-mcp/192.168.12.12.yaml
 ```
 
 ### Reasonix
@@ -269,12 +274,16 @@ codex mcp add hpc \
 reasonix mcp add hpc \
   --env HPC_MCP_HOST=192.168.12.12 \
   --env HPC_MCP_USER=username \
-  --env HPC_MCP_ROOT=/home/username/alice \
+  --env HPC_MCP_ROOT=/home/username/alice/yourhome \
   --env HPC_MCP_LOCAL_ROOT=/home/alice \
-  --env HPC_MCP_ALLOWED_PARTITIONS=thcp1 \
+  --env HPC_MCP_ALLOWED_PARTITIONS=compute,debug \
   --env HPC_MCP_SSH_BIN=/mnt/c/Windows/System32/OpenSSH/ssh.exe \
   --env HPC_MCP_SFTP_BIN=/mnt/c/Windows/System32/OpenSSH/sftp.exe \
- hpc-mcp
+  --env HPC_MCP_PORT=22 \
+  --env HPC_MCP_LOG_FILE=/home/alice/.local/share/hpc-mcp/hpc-mcp.log \
+  --env HPC_MCP_LOG_LEVEL=INFO \
+  /home/alice/venvs/hpc-mcp/bin/hpc-mcp \
+  --config /home/alice/.config/hpc-mcp/192.168.12.12.yaml
 ```
 
 注册后客户端会用 stdio 启动 `hpc-mcp`，这时你在客户端里就能让它「列出我的项目目录」「提交一个 Slurm 作业」了。

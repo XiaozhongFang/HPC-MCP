@@ -16,18 +16,18 @@ hpc-mcp 是 **stdio** 类型的 MCP server：CC-Switch 里用 `type: "stdio"` +
 {
   "name": "hpc-mcp",
   "type": "stdio",
-  "command": "/home/yourname/git_repo/HPC-MCP/scripts/hpc-mcp-run",
-  "args": [],
+  "command": "/home/alice/venvs/hpc-mcp/bin/hpc-mcp",
+  "args": ["--config", "/home/alice/.config/hpc-mcp/192.168.12.12.yaml"],
   "env": {
-    "HPC_MCP_HOST": "my-hpc",
+    "HPC_MCP_HOST": "hpc",
     "HPC_MCP_USER": "shared_account",
-    "HPC_MCP_ROOT": "/home/shared_account/alice",
-    "HPC_MCP_LOCAL_ROOT": "/home/yourname/my-project",
+    "HPC_MCP_ROOT": "/home/shared_account/alice/yourhome",
+    "HPC_MCP_LOCAL_ROOT": "/home/alice/project",
     "HPC_MCP_ALLOWED_PARTITIONS": "compute,debug",
-    "HPC_MCP_SSH_BIN": "/usr/bin/ssh",
-    "HPC_MCP_SFTP_BIN": "/usr/bin/sftp",
+    "HPC_MCP_SSH_BIN": "/mnt/c/Windows/System32/OpenSSH/ssh.exe",
+    "HPC_MCP_SFTP_BIN": "/mnt/c/Windows/System32/OpenSSH/sftp.exe",
     "HPC_MCP_PORT": "22",
-    "HPC_MCP_LOG_FILE": "/home/yourname/.local/share/hpc-mcp/hpc-mcp.log",
+    "HPC_MCP_LOG_FILE": "/home/alice/.local/share/hpc-mcp/hpc-mcp.log",
     "HPC_MCP_LOG_LEVEL": "INFO"
   }
 }
@@ -35,7 +35,7 @@ hpc-mcp 是 **stdio** 类型的 MCP server：CC-Switch 里用 `type: "stdio"` +
 
 > 若你的环境里 `hpc-mcp` 已装在 conda/venv 且不在 PATH，可把 `command`
 > 直接指向可执行文件全路径，例如：
-> `"/home/yourname/venvs/hpc-mcp/bin/hpc-mcp"`。
+> `"/home/alice/venvs/hpc-mcp/bin/hpc-mcp"`。
 > 仓库内的 `scripts/hpc-mcp-run` 启动脚本会自动定位本机安装，最可移植。
 
 ---
