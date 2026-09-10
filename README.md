@@ -1,5 +1,10 @@
 # HPC-MCP
 
+[![Tests](https://github.com/XiaozhongFang/HPC-MCP/actions/workflows/tests.yml/badge.svg)](https://github.com/XiaozhongFang/HPC-MCP/actions/workflows/tests.yml)
+
+MCP server for AI agents to interact with HPC clusters, Slurm jobs,
+SSH, files, and scientific computing workflows.
+
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 [![MCP stdio server](https://img.shields.io/badge/MCP-stdio%20server-6f42c1.svg)](https://modelcontextprotocol.io)
