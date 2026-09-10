@@ -1,5 +1,7 @@
 # Security Review (2026-09-04)
 
+Other languages: [简体中文](zh-CN/SECURITY_REVIEW.md) | [日本語](ja/SECURITY_REVIEW.md) | [한국어](ko/SECURITY_REVIEW.md) | [繁體中文](zh-TW/SECURITY_REVIEW.md)
+
 ## Findings and fixes
 
 | Severity | Area | Finding | Remediation |

@@ -1,5 +1,7 @@
 # HPC-MCP Architecture
 
+Other languages: [简体中文](zh-CN/ARCHITECTURE.md) | [日本語](ja/ARCHITECTURE.md) | [한국어](ko/ARCHITECTURE.md) | [繁體中文](zh-TW/ARCHITECTURE.md)
+
 HPC-MCP is a stdio MCP server. The MCP protocol is the only data written to
 stdout; diagnostics and audit records go to stderr or the configured log file.
 

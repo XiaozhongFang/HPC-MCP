@@ -1,67 +1,66 @@
-# 快速上手与排障（手把手）
+# Quick Start & Troubleshooting (step by step)
 
-这份文档带你从零跑通 hpc-mcp，并解释每个参数、常见“卡住”现象的原因。
+This document walks you from zero to a working hpc-mcp, and explains every flag plus the usual "it hangs" symptoms.
 
----
-
-## 0. 一分钟理解它在干什么
-
-`hpc-mcp` 是一个 **MCP Server（stdio）**，它不是一次性命令：
-
-- 你用 `hpc-mcp ...` 启动它后，它会打印一行 `starting: ...` 然后**停在那里等待输入**。
-  **这是正常的！** 它在等 MCP 客户端（Codex / Reasonix）通过标准输入发来请求。
-  它**此刻还没有连接 SSH**，所以光看启动日志判断不了 SSH 通不通。
-- 真正的 SSH 连接发生在客户端第一次调用工具（比如 `hpc.info`）时。
-- 想**立刻验证配置和网络是否通**，用 `--check`（见第 3 步），它会主动连一次 SSH 并打印结果。
+> Other languages: [简体中文](zh-CN/QUICKSTART.md) | [日本語](ja/QUICKSTART.md) | [한국어](ko/QUICKSTART.md) | [繁體中文](zh-TW/QUICKSTART.md)
 
 ---
 
-## 1. 安装
+## 0. What it is, in one minute
 
-**强烈建议用独立的虚拟环境安装**，不要直接 `pip install --user` 塞进系统
-`~/.local`——否则会和系统里已有的包（torch、httpcore 等）互相冲突，出现
-`UNKNOWN-0.0.0` 空壳包、`pip's dependency resolver does not take into account...`
-警告。
+`hpc-mcp` is an **MCP server (stdio)** — it is not a one-shot command:
 
-### 方案 A（推荐）：virtualenv 隔离环境
+- After you launch it with `hpc-mcp ...`, it prints a `starting: ...` line and then **just sits there waiting for input**.
+  **That is normal!** It is waiting for an MCP client (Codex / Reasonix) to send requests over stdin.
+  It has **not connected over SSH yet**, so the startup log tells you nothing about SSH reachability.
+- The real SSH connection happens the first time the client calls a tool (e.g. `hpc.info`).
+- To **verify the config and the network right now**, use `--check` (step 3): it actively connects once and prints the result.
 
-系统缺少 `python3-venv` 时用 virtualenv（纯用户级，无需 root）：
+---
+
+## 1. Install
+
+**Strongly prefer a dedicated virtual environment** — do not dump it into the system `~/.local` with `pip install --user`, or it will fight with packages already installed there (torch, httpcore, ...) and you will see `UNKNOWN-0.0.0` ghost packages and `pip's dependency resolver does not take into account...` warnings.
+
+### Option A (recommended): an isolated virtualenv
+
+If the system lacks `python3-venv`, use virtualenv (user-level, no root needed):
 
 ```bash
-# 1. 安装 virtualenv（一次性）
+# 1. Install virtualenv (once)
 python3 -m pip install --user virtualenv
 
-# 2. 创建项目专用环境（只建一次，以后一直用）
+# 2. Create the project environment (once; reuse it afterwards)
 python3 -m virtualenv ~/venvs/hpc-mcp
 
-# 3. 激活并安装 hpc-mcp
+# 3. Activate it and install hpc-mcp
 source ~/venvs/hpc-mcp/bin/activate
 cd ~/git_repo/HPC-MCP
 pip install .
 
-# 4. 使用
-hpc-mcp --version        # 应输出 hpc-mcp 0.1.0
+# 4. Use it
+hpc-mcp --version        # should print hpc-mcp 0.1.0
 hpc-mcp --help
 ```
 
-> 如果系统已装 `python3-venv`，可改用标准库：
-> `python3 -m venv ~/venvs/hpc-mcp`（其余步骤相同）。
+> If `python3-venv` is available, the stdlib route works too:
+> `python3 -m venv ~/venvs/hpc-mcp` (the rest is identical).
 
-验证时若 `hpc-mcp` 找不到，检查是否已激活环境，或直接用全路径：
+If `hpc-mcp` is not found afterwards, check that the environment is activated, or call it by full path:
 
 ```bash
 ~/venvs/hpc-mcp/bin/hpc-mcp --version
 ```
 
-给 Codex / Reasonix 注册时，把命令换成该环境的全路径：
+When registering the MCP server with Codex / Reasonix, use that full path:
 
 ```bash
 codex mcp add hpc ... -- ~/venvs/hpc-mcp/bin/hpc-mcp
 ```
 
-### 方案 B：conda
+### Option B: conda
 
-如果你已经用 conda：
+If you already use conda:
 
 ```bash
 conda create -n hpc-mcp python=3.10
@@ -70,75 +69,71 @@ cd ~/git_repo/HPC-MCP
 pip install .
 ```
 
-### 方案 C：直接装进 ~/.local（不推荐，仅临时用）
+### Option C: straight into ~/.local (not recommended, temporary only)
 
 ```bash
 cd ~/git_repo/HPC-MCP
 python3 -m pip install --user .
 ```
 
-> 若出现 `UNKNOWN-0.0.0` 或依赖冲突警告，说明 pip/setuptools 太旧或
-> `~/.local` 已混乱，请改用方案 A。
+> If you get `UNKNOWN-0.0.0` or dependency-conflict warnings, your pip/setuptools is too old or your `~/.local` is already a mess — use Option A instead.
 
-### 遇到问题先看
+### If something goes wrong
 
-- `pip install .` 出现 `UNKNOWN-0.0.0` → pip/setuptools 太旧，环境没隔离。
-- 出现 `ERROR: pip's dependency resolver does not currently take into account...`
-  → 系统 `~/.local` 里有别的包冲突（torch/httpcore 等）。**不影响 hpc-mcp 运行**，
-  但说明该环境已混装，建议换虚拟环境。
+- `pip install .` yields `UNKNOWN-0.0.0` → pip/setuptools too old, environment not isolated.
+- `ERROR: pip's dependency resolver does not currently take into account...`
+  → other packages in `~/.local` conflict (torch/httpcore etc.). **This does not break hpc-mcp**, but it does mean that environment is mixed; switch to a virtualenv.
 
-### ⚠️ 安装后第一步：确认 SSH 免密登录已配置
+### ⚠️ First thing after installing: make sure passwordless SSH works
 
-**hpc-mcp 强制使用免密登录（BatchMode=yes，禁止密码交互）**。如果没配免密，
-server 一启动工具调用就会全部失败（`Permission denied`），而且**不会弹出密码提示**。
-所以装完包、连集群之前，**务必先手动确认免密可用**：
+**hpc-mcp forces passwordless login (`BatchMode=yes`, no password prompts).** Without it, every tool call fails with `Permission denied` as soon as the server starts — and **no password prompt will ever appear**. So after installing and before wiring up the cluster, **verify key auth manually**:
 
 ```bash
-# 关键：加 -o BatchMode=yes 模拟 hpc-mcp 的连接方式，
-# 如果这行能直接返回 OK（不询问密码），说明免密已就绪：
+# Key point: -o BatchMode=yes mimics how hpc-mcp connects.
+# If this returns OK without asking for a password, key auth is ready:
 ssh -o BatchMode=yes -o ConnectTimeout=10 username@192.168.12.12 "echo OK"
 ```
 
-- 能打印 `OK` → 免密已配置，直接继续第 3 步。
-- 报 `Permission denied (publickey...)` → **还没免密**，先配：
+- Prints `OK` → key auth is configured, continue with step 3.
+- `Permission denied (publickey...)` → **no key auth yet**, set it up first:
   ```bash
-  ssh-copy-id username@192.168.12.12   # 会要一次密码，之后就不用
+  ssh-copy-id username@192.168.12.12   # asks for the password once, never again
   ```
-  然后重跑上面的 BatchMode 确认命令。
-- 报 `Connection timed out` → 网络不通，先连 VPN / 配跳板机（见第 2 节）。
+  then re-run the BatchMode check above.
+- `Connection timed out` → the network is unreachable; connect the VPN / configure the jump host first (step 2).
 
-> 用 `~/.ssh/config` 管理连接时，确认命令里的主机换成 `Host` 别名：
+> If you manage connections through `~/.ssh/config`, use the `Host` alias in the command instead:
 > `ssh -o BatchMode=yes my-hpc "echo OK"`
 
 ---
 
-## 2. 准备 SSH：先确保“裸 ssh 能免密登上”
+## 2. Prepare SSH: make plain `ssh` work passwordless first
 
-hpc-mcp 底层用的是系统 OpenSSH，**一切 ssh 问题先在终端里复现**。先手动测：
+hpc-mcp uses the system OpenSSH underneath, so **reproduce every ssh problem in a terminal first**. Test manually:
 
 ```bash
 ssh username@192.168.12.12 "echo OK && hostname"
 ```
 
-三种结果：
+Three possible outcomes:
 
-| 结果 | 含义 | 怎么办 |
+| Result | Meaning | What to do |
 |---|---|---|
-| 打印 `OK` + 主机名 | 免密 + 网络都通 | 直接进第 3 步 |
-| 卡在 `password:` | 没有免密 | 配 SSH key：`ssh-copy-id username@192.168.12.12` |
-| `Connection timed out` / 100% 丢包 | **网络根本不通** | 见下面“网络不通” |
+| Prints `OK` + hostname | key auth and network both fine | continue with step 3 |
+| Hangs at `password:` | no key auth | configure a key: `ssh-copy-id username@192.168.12.12` |
+| `Connection timed out` / 100% packet loss | **network unreachable** | see "Network unreachable" below |
 
-### 网络不通（最常见）
+### Network unreachable (the most common case)
 
-`192.168.12.12` 是**内网地址**。如果你当前不在校园网/没连 VPN，从外网是连不上的。
+`192.168.12.12` is a **private-network address**. If you are not on the campus network or VPN, you simply cannot reach it from the outside.
 
-- 先确认平时怎么上的：要不要先连 VPN？要不要走跳板机？
-- 需要 VPN：连上 VPN 再测。
-- 需要跳板机：见第 4 步的 `~/.ssh/config` 配置（ProxyJump）。
+- First ask yourself how you normally reach it: does it need a VPN first? a jump host?
+- VPN required: connect, then test again.
+- Jump host required: see the `~/.ssh/config` example with `ProxyJump` in step 4.
 
-### 强烈推荐：用 `~/.ssh/config` 管理连接
+### Strongly recommended: manage connections with `~/.ssh/config`
 
-把连接细节写进 config，hpc-mcp 的 `--host` 直接引用别名，最省心：
+Put the connection details in the config and let `--host` reference the alias — least friction:
 
 ```sshconfig
 # ~/.ssh/config
@@ -146,17 +141,17 @@ Host 192.168.12.12
     HostName 192.168.12.12
     User username
     IdentityFile ~/.ssh/id_ed25519
-    # 需要跳板机时打开下面这行（把 jump-host 换成你的跳板）：
+    # Uncomment the next line when you need a jump host (replace jump-host):
     # ProxyJump jump-host
 ```
 
-配好后终端测 `ssh 192.168.12.12 "echo OK"` 能通，hpc-mcp 就用 `--host 192.168.12.12`。
+Once `ssh 192.168.12.12 "echo OK"` works in a terminal, use `--host 192.168.12.12` with hpc-mcp.
 
 ---
 
-## 3. 用 `--check` 验证（关键！不要跳过）
+## 3. Verify with `--check` (important — do not skip)
 
-`--check` 会**主动连一次 SSH** 并打印远端信息，配置/网络对不对立刻知道：
+`--check` **actively connects over SSH once** and prints remote information, so you immediately know whether config and network are right:
 
 ```bash
 hpc-mcp \
@@ -169,106 +164,107 @@ hpc-mcp \
   --check
 ```
 
-- 成功：打印 `Configuration OK. Remote probe succeeded:` 及 hostname / 远程用户 / Slurm 是否可用。
-- 失败：打印 `Connection check FAILED: ...` 及原因（超时 / 拒绝 / 认证失败），据此排查。
+- Success: prints `Configuration OK. Remote probe succeeded:` plus hostname / remote user / whether Slurm is available.
+- Failure: prints `Connection check FAILED: ...` with the cause (timeout / refused / auth failure) to troubleshoot from.
 
-> **判断依据**：`--check` 成功 = 网络和配置都没问题，之后接 Codex/Reasonix 就能用。
-> `--check` 都失败 = 先去解决 SSH/网络，别急着接客户端。
+> **How to read it**: `--check` succeeding means network and config are both fine, and you can wire up Codex/Reasonix next.
+> `--check` failing means fix SSH/network first — do not bother with the client yet.
 
 ---
 
-## 4. 参数说明
+## 4. Flags
 
-> 这一节只列**启动/自检相关**的 CLI 参数。完整的配置文件参数（含
-> `slurm.*`、`files.*`、`topology.*` 及全部环境变量）见
-> [CONFIGURATION.md](CONFIGURATION.md)；**每个 MCP 工具的参数**见
-> [TOOLS.md](TOOLS.md)。
+> This section only covers **startup/self-check** CLI flags. The full config-file keys
+> (`slurm.*`, `files.*`, `topology.*` and all environment variables) are in
+> [CONFIGURATION.md](CONFIGURATION.md); **per-tool arguments** are in
+> [TOOLS.md](TOOLS.md).
 
-| 参数 | 作用 | 环境变量 | 是否必填 |
+| Flag | Purpose | Environment variable | Required |
 |---|---|---|---|
-| `--host` | HPC 主机（IP 或 `~/.ssh/config` 别名） | `HPC_MCP_HOST` | **必填** |
-| `--user` | SSH 登录用户（这里是共享账号） | `HPC_MCP_USER` | 建议填 |
-| `--root` | **远程**沙箱根目录，Agent 只能动这里面的文件 | `HPC_MCP_ROOT` | **必填** |
-| `--local-root` | **本地**允许上传/下载的目录（默认=启动时所在目录 + `/tmp`，可多个用 `local_roots`） | `HPC_MCP_LOCAL_ROOT` / `HPC_MCP_LOCAL_ROOTS` | 可选 |
-| `--port` | SSH 端口（默认 22） | `HPC_MCP_PORT` | 可选 |
-| `--identity-file` | 私钥路径（默认用 `~/.ssh/config`） | `HPC_MCP_IDENTITY_FILE` | 可选 |
-| `--ssh-bin` | ssh 可执行文件路径，如 `/usr/bin/ssh`、`@/usr/bin/ssh`、`@/mnt/c/.../ssh.exe` | `HPC_MCP_SSH_BIN` | 可选 |
-| `--sftp-bin` | sftp 可执行文件路径（形式同 `--ssh-bin`） | `HPC_MCP_SFTP_BIN` | 可选 |
-| `--config` | YAML 配置文件路径 | — | 可选 |
-| `--check` | 只验证连通性然后退出 | — | 可选 |
-| `--log-file` | 日志追加写入的文件（同时仍写 stderr） | `HPC_MCP_LOG_FILE` | 可选 |
-| `--log-level` | 日志级别：`DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`（默认 `INFO`） | `HPC_MCP_LOG_LEVEL` | 可选 |
-| `--version` | 打印版本并退出 | — | 可选 |
+| `--host` | HPC host (IP or a `~/.ssh/config` alias) | `HPC_MCP_HOST` | **yes** |
+| `--user` | SSH login user (the shared account here) | `HPC_MCP_USER` | recommended |
+| `--root` | **remote** sandbox root; the agent may only touch files below it | `HPC_MCP_ROOT` | **yes** |
+| `--local-root` | **local** directories allowed for upload/download (default = working directory + `/tmp`; multiple via `local_roots`) | `HPC_MCP_LOCAL_ROOT` / `HPC_MCP_LOCAL_ROOTS` | optional |
+| `--port` | SSH port (default 22) | `HPC_MCP_PORT` | optional |
+| `--identity-file` | private-key path (defaults to `~/.ssh/config`) | `HPC_MCP_IDENTITY_FILE` | optional |
+| `--ssh-bin` | ssh executable path, e.g. `/usr/bin/ssh`, `@/usr/bin/ssh`, `@/mnt/c/.../ssh.exe` | `HPC_MCP_SSH_BIN` | optional |
+| `--sftp-bin` | sftp executable path (same forms as `--ssh-bin`) | `HPC_MCP_SFTP_BIN` | optional |
+| `--config` | YAML config file path | — | optional |
+| `--check` | verify connectivity only, then exit | — | optional |
+| `--log-file` | append logs to this file (stderr is still written) | `HPC_MCP_LOG_FILE` | optional |
+| `--log-level` | log level: `DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL` (default `INFO`) | `HPC_MCP_LOG_LEVEL` | optional |
+| `--version` | print the version and exit | — | optional |
 
-子命令 `hpc-mcp mcp-add`（自动写入 Codex / Reasonix 的 MCP 配置，幂等，不破坏已有配置）：
+Subcommand `hpc-mcp mcp-add` (writes the Codex / Reasonix MCP config; idempotent, never damages existing config):
 
-| 参数 | 作用 | 默认 |
+| Flag | Purpose | Default |
 |---|---|---|
-| `--client` | 要更新的客户端：`codex`、`reasonix`、`all` | `all` |
-| `--config` | YAML 配置路径（其中的 host/root 等会被写入客户端 env） | — |
-| `--host` / `--user` / `--root` | 直接传参（不通过配置文件时使用） | — |
+| `--client` | which client(s) to update: `codex`, `reasonix`, `all` | `all` |
+| `--config` | YAML config path (its host/root etc. get written into the client env) | — |
+| `--host` / `--user` / `--root` | pass values directly (when not using a config file) | — |
 
-**关于 `--local-root`**：它限制 `hpc.files.upload`/`download` 能访问的**本地**目录范围，防止 Agent 读你本地的 `.ssh` 等敏感目录。一般设为当前项目目录（`$PWD`）即可。**它不是必填**，不传就默认当前目录。
+**About `--local-root`**: it bounds the **local** directories `hpc.files.upload`/`download` may touch, so the agent cannot read sensitive local paths such as `.ssh`. Setting it to the current project directory (`$PWD`) is usually enough. It is **not required**; the default is the current directory.
 
-**关于 `--root`**：这是远程集群上**专属于你的子目录**（因为登录用的是共享账号 `username`）。你填的 `/home/username/alice` 就是你在这个共享账号下的个人空间——完全正确。
+**About `--root`**: this is the **subdirectory dedicated to you** on the remote cluster (since the login uses the shared account `username`). `/home/username/alice` is your personal space under that shared account — exactly right.
 
 ---
 
-## 5. 用配置文件代替一长串参数（推荐）
+## 5. Use a config file instead of a long flag list (recommended)
 
-把参数固化到 YAML，以后一条命令启动：
+Freeze the flags into YAML and start with a single command afterwards:
 
 ```bash
 mkdir -p ~/.config/hpc-mcp
 cat > ~/.config/hpc-mcp/192.168.12.12.yaml <<'EOF'
-host: 192.168.12.12                                  # ~/.ssh/config 里的 Host 别名
+host: 192.168.12.12                                  # Host alias from ~/.ssh/config
 user: username
 root: /home/username/alice
-local_root: /home/alice               # 本地允许目录
+local_root: /home/alice               # allowed local directory
 ssh_bin: /mnt/c/Windows/System32/OpenSSH/ssh.exe
 sftp_bin: /mnt/c/Windows/System32/OpenSSH/sftp.exe
 
 slurm:
-  allowed_partitions: [thcp1]               # 改成你集群真实分区名！
+  allowed_partitions: [thcp1]               # replace with your real partition name!
   max_cpus: 64
   max_nodes: 2
   max_time: "24:00:00"
 
-# 可选：计算节点拓扑探测（hpc.cluster.topo 用）
+# Optional: compute-node topology discovery (used by hpc.cluster.topo)
 # topology:
-#   enabled: true             # false = 不注册该工具，永不提交采集作业
-#   cache_ttl_seconds: 86400  # 拓扑缓存 24h
+#   enabled: true             # false = do not register the tool, never submit a probe job
+#   cache_ttl_seconds: 86400  # topology cache for 24h
 EOF
 ```
 
-启动 / 自检：
+Start / self-check:
 
 ```bash
 hpc-mcp --config ~/.config/hpc-mcp/192.168.12.12.yaml --check
 ```
 
-> 注意：`allowed_partitions` 默认是**空**（= 拒绝一切提交，fail-closed）。
-> 务必改成你集群真实的分区名（用 `sinfo` 在集群上查）。
+> Note: `allowed_partitions` defaults to **empty** (= deny every submission, fail-closed).
+> Always set it to your cluster's real partition names (look them up with `sinfo` on the cluster).
 
-> **键名规则**：配置文件里的键用**下划线**（`ssh_bin`、`local_root`、
-> `allowed_partitions`），和 `config/example.yaml` 保持一致。
-> 连字符写法（`ssh-bin`）也会被自动识别，但不推荐。
-> 拼错的键不会报错，只会打一行
-> `Ignoring unknown config key 'xxx'` 警告然后被忽略——看到这行就要改配置。
+> **Key naming**: config-file keys use **underscores** (`ssh_bin`, `local_root`,
+> `allowed_partitions`), matching `config/example.yaml`. Hyphenated forms
+> (`ssh-bin`) are recognised as aliases but not recommended.
+> A misspelled key does not error out; it only logs
+> `Ignoring unknown config key 'xxx'` and is ignored — if you see that line, fix the config.
 
-> **改了源码/配置却没生效？** 如果你是 `pip install .` 安装的，
-> 虚拟环境里是一份**拷贝**，改仓库源码不会自动生效，必须重装：
+> **Changed the source/config but nothing happened?** If you installed with
+> `pip install .`, the virtualenv holds a **copy**; editing the repo source has no
+> effect until you reinstall:
 > ```bash
 > source ~/venvs/hpc-mcp/bin/activate
 > cd ~/git_repo/HPC-MCP && pip install .
-> # 或装成可编辑模式，以后改代码立刻生效：pip install -e .
+> # or install editable so future edits apply immediately: pip install -e .
 > ```
 
 ---
 
-## 6. 接入 Codex / Reasonix
+## 6. Hook up Codex / Reasonix
 
-`--check` 通过后，注册到客户端：
+Once `--check` passes, register the server with your client:
 
 ### Codex
 
@@ -307,28 +303,28 @@ reasonix mcp add hpc \
   --config /home/alice/.config/hpc-mcp/192.168.12.12.yaml
 ```
 
-注册后客户端会用 stdio 启动 `hpc-mcp`，这时你在客户端里就能让它「列出我的项目目录」「提交一个 Slurm 作业」了。
+After registering, the client starts `hpc-mcp` over stdio, and you can ask it to "list my project directory" or "submit a Slurm job".
 
 ---
 
-## 7. “卡住”现象对照表
+## 7. "It hangs" symptom table
 
-| 你看到的现象 | 真实原因 | 处理 |
+| Symptom | Real cause | Fix |
 |---|---|---|
-| 启动后停在 `starting: ...` 不动 | **正常**，stdio server 在等客户端输入 | 不用管，去客户端里调用工具；或用 `--check` 验证 |
-| `--check` 报 `Connection timed out` | **网络不通**（内网 IP 需 VPN） | 连 VPN / 配跳板机，再 `ssh` 手动测 |
-| 命令行能连、用配置文件就连不上 | 配置里的 `ssh_bin` 没生效（键名拼错 / 装的是旧代码拷贝），于是回落到 PATH 里的 `ssh`（WSL 下是 Linux 版 ssh，不走 Windows 的 VPN 路由） | 看日志里的 `using ssh executable: ...` 是不是你配置的那个；键名改对（见第 5 节），并 `pip install .` 重装 |
-| `--check` 报 `Permission denied` | 没免密 | `ssh-copy-id` 配 key |
-| `--check` 报 `getsockname failed: Not a socket` | SSH 控制 socket 复用异常（常见于 WSL 或旧版安装） | 更新并重装 hpc-mcp；新版强制使用独立的普通 `ssh` 进程 |
-| 首次连接问 `Are you sure ... yes/no?` | 主机密钥没固定 | 手动 `ssh` 一次输入 yes；或配置 `strict_host_key_checking: accept-new` |
-| 工具调用全被拒 `No Slurm partitions are allowed` | 分区白名单为空 | 配置 `slurm.allowed_partitions` |
-| `pip install .` 得到 `UNKNOWN-0.0.0` | pip/setuptools 太旧 | 用虚拟环境重装（见第 1 节方案 A） |
-| 安装时提示 `ERROR: pip's dependency resolver does not currently take into account...`（torch/httpcore 冲突） | 系统 `~/.local` 已混装其它包 | **不影响 hpc-mcp 运行**；建议改用虚拟环境隔离（第 1 节方案 A） |
+| Stops at `starting: ...` and does nothing | **normal** — a stdio server waiting for client input | nothing to do; call tools from the client, or verify with `--check` |
+| `--check` reports `Connection timed out` | **network unreachable** (private IP needs VPN) | connect the VPN / configure the jump host, then test `ssh` manually |
+| Works from the CLI but not with the config file | `ssh_bin` in the config never took effect (typo'd key / stale installed copy), so it fell back to `ssh` on PATH (the Linux ssh under WSL does not use the Windows VPN route) | check the `using ssh executable: ...` line in the log; fix the key name (section 5) and reinstall with `pip install .` |
+| `--check` reports `Permission denied` | no key auth | configure a key with `ssh-copy-id` |
+| `--check` reports `getsockname failed: Not a socket` | broken SSH control-socket reuse (common in WSL or with old installs) | update and reinstall hpc-mcp; current versions always use a standalone plain `ssh` process |
+| First connection asks `Are you sure ... yes/no?` | host key not pinned | connect manually once and answer yes; or set `strict_host_key_checking: accept-new` |
+| Every tool denied with `No Slurm partitions are allowed` | partition allow-list is empty | configure `slurm.allowed_partitions` |
+| `pip install .` produces `UNKNOWN-0.0.0` | pip/setuptools too old | reinstall inside a virtualenv (section 1, Option A) |
+| `ERROR: pip's dependency resolver does not currently take into account...` (torch/httpcore conflicts) | system `~/.local` has other packages mixed in | **does not break hpc-mcp**; switch to an isolated virtualenv (section 1, Option A) |
 
 ---
 
-## 8. 看日志
+## 8. Reading the logs
 
-- 所有日志走 **stderr**（stdout 只留给 MCP 协议）。
-- 想落盘：`--log-file ~/.local/share/hpc-mcp/hpc-mcp.log`。
-- 想看每次调用的允许/拒绝：`--log-level DEBUG`。
+- All logs go to **stderr** (stdout is reserved for the MCP protocol).
+- To persist them: `--log-file ~/.local/share/hpc-mcp/hpc-mcp.log`.
+- To see the allow/deny decision of every call: `--log-level DEBUG`.

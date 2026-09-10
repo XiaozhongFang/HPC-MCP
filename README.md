@@ -1,108 +1,114 @@
 # HPC-MCP
 
-一个**安全优先**的 MCP Server，让 VS Code 中的 Codex、Reasonix 等 Coding Agent 通过 SSH + Slurm 安全地操作远程 HPC 集群。
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
+[![MCP stdio server](https://img.shields.io/badge/MCP-stdio%20server-6f42c1.svg)](https://modelcontextprotocol.io)
 
-> **第一次用？先看 → [docs/QUICKSTART.md](docs/QUICKSTART.md)**：手把手的安装、每个参数的说明、完整的 Codex/Reasonix 配置示例，以及“启动后卡住”“网络不通”“pip 装成 UNKNOWN”等常见问题的排查表。
+**English** | [简体中文](README.zh-CN.md) | [日本語](README.ja.md) | [한국어](README.ko.md) | [繁體中文](README.zh-TW.md)
 
-## 架构
+A **security-first MCP server** that lets coding agents (Codex, Reasonix, and any other MCP client) safely operate a remote HPC cluster over **SSH + Slurm** — path sandbox, login-node command allow-list, Slurm resource ceilings, job ownership, and a full ALLOW/DENY audit trail, all enforced in code.
+
+> **New here? Start with → [docs/QUICKSTART.md](docs/QUICKSTART.md)**: step-by-step install, every flag explained, complete Codex/Reasonix configuration examples, and a troubleshooting table for "it hangs on startup", "network unreachable", "pip installed it as UNKNOWN", and similar problems.
+
+## Architecture
 
 ```text
 Codex / Reasonix (Agent)
         │  MCP (stdio)
         ▼
-  Project Skill            ← 行为指南（非安全边界）
+  Project Skill            ← behaviour guidance (not a security boundary)
         │
         ▼
-  HPC MCP Server           ← 安全边界（代码级强制）
+  HPC MCP Server           ← the security boundary (enforced in code)
         │
-        ├── Path Sandbox        （USER_ROOT 强制）
-        ├── Command Policy      （login node 白名单）
-        ├── Slurm Resource Policy（分区/资源/并发限制）
-        ├── SSH Manager         （固定 argv，无本地 shell）
-        ├── Job Tracker         （共享账号下的作业归属）
-        └── Audit Logger        （每次调用 ALLOW/DENY 审计）
+        ├── Path Sandbox        (USER_ROOT enforced)
+        ├── Command Policy      (login-node allow-list)
+        ├── Slurm Resource Policy (partitions / resources / concurrency)
+        ├── SSH Manager         (fixed argv, no local shell)
+        ├── Job Tracker         (job ownership under a shared account)
+        └── Audit Logger        (ALLOW/DENY record for every call)
         │ SSH / SFTP
         ▼
-  HPC Login Node  ──只允许轻量查询──┐
-        │ sbatch                   │
-        ▼                          ▼
-  Compute Node (Slurm)      用户工作目录 $HPC_MCP_ROOT
+  HPC Login Node  ──lightweight queries only──┐
+        │ sbatch                               │
+        ▼                                      ▼
+  Compute Node (Slurm)              User work dir $HPC_MCP_ROOT
         │
    Julia / MOOSE / Python / CMake
 ```
 
-设计原则：**MCP 是安全边界；Skill 只是行为指南**。即使 Agent 提示词错误、Skill 被误解，核心权限边界也无法被绕过。
+Design principle: **the MCP server is the security boundary; the skill is only behavioural guidance.** Even if the agent's prompt is wrong or the skill is misread, the core permission boundary cannot be bypassed.
 
-## 安全模型
+## Security model
 
-### 共享账号隔离
+### Shared-account isolation
 
-HPC 常使用共享账号（如 `/home/shared_account/`）。该 home 目录**不等于**用户自己的目录。必须配置：
+HPC clusters often use a shared account (e.g. `/home/shared_account/`). That home directory is **not** the user's own directory. You must configure:
 
 ```
 HPC_MCP_ROOT=/home/shared_account/alice
-export HPC_MCP_LOCAL_ROOT=$PWD       # 上传/下载允许访问的本地目录
+export HPC_MCP_LOCAL_ROOT=$PWD       # local directories allowed for upload/download
 ```
 
-所有远程文件操作都被限制在该 root 之下（含符号链接 canonical 校验）。本地 `upload`/`download` 同样被限制在 `local_roots`（一个或多个本地允许目录，默认 = 启动进程当前目录 + 系统临时目录 `/tmp`），拒绝 `.ssh`、私钥和符号链接路径。其他用户的目录（`/home/shared_account/other_user`）、系统目录（`/etc`、`/opt`）一律拒绝。
+Every remote file operation is confined below that root (including canonical symlink checks). Local `upload`/`download` are likewise confined to `local_roots` (one or more allowed local directories; defaults to the process working directory plus the system temp dir `/tmp`), and reject `.ssh`, private keys, and symlinked paths. Other users' directories (`/home/shared_account/other_user`) and system directories (`/etc`, `/opt`) are always denied.
 
-### Login Node 策略
+### Login-node policy
 
-登录节点只允许轻量、只读的管理命令（白名单制）：`ls`、`find`、`cat`、`grep`、`head`、`tail`、`git status/diff/log`、`module list/avail` 等。为防止共享账号下查看其他使用者的作业，`squeue`、`sacct`、`scontrol` 不再通过 `hpc.shell.run_safe` 暴露，只能使用带归属检查的 Slurm 工具。
+Login nodes accept only lightweight, read-only administrative commands (allow-list): `ls`, `find`, `cat`, `grep`, `head`, `tail`, `git status/diff/log`, `module list/avail`, and similar. To prevent looking at other users' jobs under a shared account, `squeue`, `sacct`, and `scontrol` are **not** exposed through `hpc.shell.run_safe`; they are reachable only via the Slurm tools that enforce ownership checks.
 
-**永远拒绝**在登录节点执行计算与编译：`julia`、`python`、`make`、`cmake --build`、`ninja`、`mpirun`、`srun`、`pytest`、`matlab`、GPU 程序等——全部引导至 `hpc.slurm.submit`。
+**Always denied** on login nodes: compute and build workloads such as `julia`, `python`, `make`, `cmake --build`, `ninja`, `mpirun`, `srun`, `pytest`, `matlab`, GPU programs — all of them are redirected to `hpc.slurm.submit`.
 
-命令策略在**代码层面**拒绝：shell 元字符（`;`、`&&`、`||`、`|`、`>`、`<`、`$()`、反引号、`&`）、路径形式的任意可执行文件（`./program`）、`find -exec`、`git -c`、嵌套 shell、`sudo`/`ssh`/`curl` 等危险程序。解析失败同样拒绝（fail-closed）。
+The command policy rejects, **at the code level**: shell metacharacters (`;`, `&&`, `||`, `|`, `>`, `<`, `$()`, backticks, `&`), path-form executables (`./program`), `find -exec`, `git -c`, nested shells, and dangerous programs such as `sudo`/`ssh`/`curl`. A parse failure is denied too (fail-closed).
 
-`env`/`printenv` 即使被请求，也只在清空后的最小环境中运行；不会返回 SSH token、密钥或集群凭证。所有命令的路径操作数会再次执行远程 `realpath` 校验，并拒绝跟随符号链接的选项。
+Even when requested, `env`/`printenv` run in a scrubbed minimal environment; SSH tokens, keys, and cluster credentials are never returned. Path operands of every command are re-validated with a remote `realpath`, and symlink-following options are rejected.
 
-### Slurm 资源策略
+### Slurm resource policy
 
-`hpc.slurm.submit` 是唯一计算入口。Server 端强制：
+`hpc.slurm.submit` is the only compute entry point. The server enforces:
 
-- 分区白名单（默认空 = 拒绝一切；agent 只能选用白名单内的分区）
+- partition allow-list (empty by default = deny everything; the agent may only pick a partition on the list)
 - `max_nodes` / `max_cpus` / `max_memory_mb` / `max_gpus` / `max_time`
-- `max_concurrent_jobs`（并发上限）
-- 工作目录必须位于 USER_ROOT 内
-- 作业 stdout/stderr 固定捕获到 `$ROOT/.hpc-mcp/jobs/<job-id>/`
+- `max_concurrent_jobs` (active-job ceiling)
+- the working directory must live inside USER_ROOT
+- job stdout/stderr are always captured under `$ROOT/.hpc-mcp/jobs/<job-id>/`
 
-### 作业归属（共享账号）
+### Job ownership (shared accounts)
 
-共享账号下 Unix 用户无法区分不同使用者。每个 MCP 实例只管理**自己提交并登记**的作业（`$ROOT/.hpc-mcp/tracked_jobs.json`）。对其他作业的 `status/output/cancel/accounting` 一律拒绝。
+Under a shared Unix account the OS cannot tell users apart. Each MCP instance manages only the jobs **it submitted and registered itself** (`$ROOT/.hpc-mcp/tracked_jobs.json`). `status`/`output`/`cancel`/`accounting` for any other job are always denied.
 
-### 失败安全（fail-closed）
+### Fail-closed
 
-配置缺失、路径无法解析、命令解析失败、分区不确定、SSH 异常等任何不确定情况统一 **DENY**，绝不回退到无限制 shell。
+Missing configuration, unresolvable paths, unparsable commands, an uncertain partition, SSH errors — every uncertain condition ends in **DENY**, never in a fallback to an unrestricted shell.
 
-### 三层安全边界
+### Three layers of defence
 
-| 层 | 机制 | 防护目标 |
+| Layer | Mechanism | Protects against |
 |---|---|---|
-| Layer 1: MCP policy | 路径沙箱、命令白名单、Slurm 资源策略、作业归属、审计 | Agent 越权/乱来 |
-| Layer 2: Slurm | 分区白名单、资源上限、并发上限、`sbatch` 入口唯一 | 计算资源滥用 |
-| Layer 3: OS/集群 | 独立 Unix UID / 作业隔离 / filesystem ACL / 容器 | **恶意代码隔离**（可选） |
+| Layer 1: MCP policy | path sandbox, command allow-list, Slurm resource policy, job ownership, audit | a misbehaving agent |
+| Layer 2: Slurm | partition allow-list, resource ceilings, concurrency ceiling, single `sbatch` entry | compute-resource abuse |
+| Layer 3: OS/cluster | separate Unix UID / job isolation / filesystem ACL / containers | **hostile code isolation** (optional) |
 
-> **残余风险（必须知晓）**：在共享 Unix UID 下，MCP 只能保证"Agent 不乱来"（Layer 1/2），**无法**保证提交到计算节点的恶意代码不访问同 UID 能访问的其他数据（Layer 3）。真正敌对的代码隔离需要独立 UID、Slurm 作业隔离 + filesystem ACL，或集群容器/沙箱。不要把 Python 侧的正则/策略当作对恶意代码的 OS 级隔离。
+> **Residual risk (must be understood)**: under a shared Unix UID, the MCP layer can only guarantee that *the agent behaves* (Layer 1/2). It **cannot** stop malicious code submitted to a compute node from touching everything else that UID can read (Layer 3). True hostile-code isolation requires an independent UID, Slurm job isolation plus filesystem ACLs, or cluster containers/sandboxes. Do not mistake the Python-side regex/policy checks for OS-level isolation of malicious code.
 
-### 查询成本与去重
+### Query cost and deduplication
 
-- `hpc.files.read` 是 **bounded slice**：单次最多 `min(max_bytes, files.max_read_slice_bytes)`（默认 256KiB）字节，不再引导 Agent 从 offset=0 读到 EOF。
-- `hpc.files.list` 递归列举**逐层分页**（`page_size` + `next_cursor`），远端 `head` 截断，绝不整树扫描后丢弃。
-- `hpc.files.search` 带硬预算（`max_matches`/`max_scan_bytes`/`max_files`/`max_depth`/`timeout`，全部服务端钳制），用于"先定位再精读"。
-- 只读幂等查询按 `tool+参数` 去重（TTL 默认 2 秒，`cache_ttl_seconds` 可调，0 禁用）；任何写操作主动失效缓存。
-- `hpc.slurm.queue/status` 只查本实例跟踪的 job ID（`squeue -j <ids>`），**绝不**扫描共享账号的全队列。
-- `hpc.shell.run_safe` 的所有命令（含白名单内合法命令）都有 **command cost 预算**：`find`/`du`/`sort`/`git grep` 等高风险命令被钳制在更短 timeout + 输出上限内。
-- 返回给 Agent 的内容（日志/文件内容）经**最小限度 secret 脱敏**（`password=`/`token=`/`Bearer`/AWS/PEM 私钥块等），与审计日志脱敏分开治理，不破坏科研日志。
+- `hpc.files.read` is a **bounded slice**: at most `min(max_bytes, files.max_read_slice_bytes)` (default 256 KiB) per call, instead of steering the agent to page from `offset=0` to EOF.
+- `hpc.files.list` pages **one depth layer at a time** (`page_size` + `next_cursor`), truncates remote output with `head`, and never scans the whole tree just to discard it.
+- `hpc.files.search` has hard budgets (`max_matches`/`max_scan_bytes`/`max_files`/`max_depth`/`timeout`, all clamped server-side) for "locate first, read precisely second".
+- Idempotent read-only queries are deduplicated per `tool + args` for a TTL (2 s by default, `cache_ttl_seconds`, 0 disables); any write invalidates the cache.
+- `hpc.slurm.queue/status` query only the job IDs tracked by this instance (`squeue -j <ids>`), and **never** scan the shared account's whole queue.
+- Every `hpc.shell.run_safe` command — including allow-listed ones — has a **command cost budget**: high-risk commands such as `find`/`du`/`sort`/`git grep` are clamped to a shorter timeout and an output cap.
+- Content returned to the agent (logs, file contents) passes through **minimal secret redaction** (`password=`/`token=`/`Bearer`/AWS/PEM private-key blocks), governed separately from audit-log redaction so scientific logs stay intact.
 
-## 安装
+## Install
 
-详细安装流程见 [docs/QUICKSTART.md](docs/QUICKSTART.md)
+Full install walkthrough: [docs/QUICKSTART.md](docs/QUICKSTART.md)
 
-安装后得到 `hpc-mcp` 命令。
+After installing you get the `hpc-mcp` command.
 
-## 配置
+## Configuration
 
-三种方式，优先级 **CLI > 环境变量 > 配置文件 > 默认值**。
+Three sources, priority **CLI > environment > config file > defaults**.
 
 ### CLI
 
@@ -110,14 +116,14 @@ export HPC_MCP_LOCAL_ROOT=$PWD       # 上传/下载允许访问的本地目录
 hpc-mcp --host my-hpc --user shared_account \
   --root /home/shared_account/alice --local-root "$PWD"
 
-# 指定 ssh/sftp 可执行文件（WSL 环境需要时）：
+# Point at a specific ssh/sftp executable (needed in some WSL setups):
 #   --ssh-bin  /usr/bin/ssh
 #   --ssh-bin  @/usr/bin/ssh
 #   --ssh-bin  @/mnt/c/Windows/System32/OpenSSH/ssh.exe
 #   --sftp-bin @/usr/bin/sftp
 ```
 
-### 环境变量
+### Environment variables
 
 ```bash
 export HPC_MCP_HOST=my-hpc
@@ -129,10 +135,9 @@ export HPC_MCP_MAX_CPUS=64
 export HPC_MCP_MAX_TIME=24:00:00
 ```
 
-### YAML 配置文件
+### YAML config file
 
-完整参数说明见 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)（所有支持的键、
-默认值、取值范围、对应环境变量）；这里是常用最小配置：
+Every supported key, its default, its range, and the matching environment variable are documented in [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md). A minimal config:
 
 ```yaml
 host: my-hpc
@@ -147,16 +152,16 @@ slurm:
   max_memory_mb: 262144      # 256 GiB
   max_gpus: 4
   max_time: "24:00:00"
-  max_concurrent_jobs: 20    # 同时活跃作业上限（默认 20，可调）
+  max_concurrent_jobs: 20    # active-job ceiling (default 20, adjustable)
 ```
 
 ```bash
 hpc-mcp --config config.yaml
 ```
 
-### SSH 配置（推荐）
+### SSH configuration (recommended)
 
-使用 `~/.ssh/config` 管理连接细节，`HPC_MCP_HOST` 直接引用 Host 别名：
+Manage connection details in `~/.ssh/config` and let `HPC_MCP_HOST` reference the Host alias:
 
 ```sshconfig
 Host my-hpc
@@ -165,57 +170,51 @@ Host my-hpc
     IdentityFile ~/.ssh/id_ed25519
 ```
 
-Agent 永远不会接触私钥内容。
+The agent never touches private-key material.
 
-**必须配置免密登录**（hpc-mcp 强制 `BatchMode=yes`，不弹密码）。配置前先用
-BatchMode 确认免密已就绪，否则所有工具调用都会报 `Permission denied`：
+**Passwordless login is required** (hpc-mcp forces `BatchMode=yes` and never prompts for a password). Verify it with BatchMode before configuring anything, otherwise every tool call fails with `Permission denied`:
 
 ```bash
-ssh -o BatchMode=yes my-hpc "echo OK"   # 能直接返回 OK 才代表免密可用
-ssh-copy-id my-hpc                      # 若上面失败，先配免密（要一次密码）
+ssh -o BatchMode=yes my-hpc "echo OK"   # must print OK without prompting
+ssh-copy-id my-hpc                      # if the above fails, set up key auth first
 ```
 
-默认 `StrictHostKeyChecking=yes`：首次连接请先手动 `ssh my-hpc` 确认主机指纹并写入 `known_hosts`；如确需首次自动登记，可在配置中设 `ssh.strict_host_key_checking: accept-new`。
+`StrictHostKeyChecking=yes` is the default: connect manually with `ssh my-hpc` once to verify the host fingerprint and write it to `known_hosts`. If you really need first-connect auto-registration, set `ssh.strict_host_key_checking: accept-new` in the config.
 
-### 连通性自检
+### Connectivity self-check
 
 ```bash
 hpc-mcp --host my-hpc --root /home/shared_account/alice --check
 ```
 
-## MCP 客户端集成
+## MCP client integration
 
-### 推荐：一条命令自动注册（`hpc-mcp mcp-add`）
+### Recommended: one-command registration (`hpc-mcp mcp-add`)
 
-安装好之后，用 `mcp-add` 自动把 hpc-mcp 注册进 Codex 和 Reasonix 的配置。
-它写入的是**可移植的启动脚本路径**（`<repo>/scripts/hpc-mcp-run`），该脚本
-自动定位本机的 hpc-mcp（conda/venv/PATH），因此**不绑定**某台机器的
-conda 路径，换机器后重新 clone + 安装即可：
+Once installed, `mcp-add` registers hpc-mcp in the Codex and Reasonix configs for you. It writes a **portable launcher path** (`<repo>/scripts/hpc-mcp-run`); that script locates the local hpc-mcp install (conda/venv/PATH) by itself, so the config is **not** tied to one machine's conda path — clone + install again on another machine and you are done:
 
 ```bash
-# 在仓库目录内运行（会找到仓库的 scripts/hpc-mcp-run）
+# Run inside the repository (it finds the repo's scripts/hpc-mcp-run)
 cd ~/git_repo/HPC-MCP
 hpc-mcp mcp-add --config ~/.config/hpc-mcp/192.168.10.10.yaml
 
-# 或直接传参
+# Or pass arguments directly
 hpc-mcp mcp-add --host my-hpc --user shared_account --root /home/shared_account/alice
 ```
 
-效果：
-- `~/.codex/config.toml` 写入 `[mcp_servers.hpc]`（command 指向 `scripts/hpc-mcp-run`）
-- `~/.reasonix/config.toml` 写入 hpc plugin（同样指向启动脚本）
-- 启动脚本按顺序定位 hpc-mcp：`$HPC_MCP_BIN` → PATH → 常见 conda/venv 路径；
-  找不到时给出清晰提示而不是静默失败
-- 只新增/更新 hpc 段，**不破坏**你已有的其它 MCP server / provider 配置
-- 幂等：重复运行不会产生重复段
+What it does:
 
-改完后**重启 Codex / Reasonix** 即可。
+- writes `[mcp_servers.hpc]` into `~/.codex/config.toml` (command points at `scripts/hpc-mcp-run`)
+- writes the hpc plugin into `~/.reasonix/config.toml` (same launcher script)
+- the launcher resolves hpc-mcp in order: `$HPC_MCP_BIN` → PATH → common conda/venv paths, and prints a clear message instead of failing silently
+- only adds/updates the hpc section — your other MCP servers and providers are left untouched
+- idempotent: running it twice does not create duplicate sections
 
-### CC-Switch（MCP 配置管理器）
+Restart Codex / Reasonix afterwards.
 
-[CC-Switch](https://github.com/farion1231/cc-switch) 用 JSON 管理多个 MCP
-server 配置并支持一键切换。完整的 stdio JSON 配置（`command` +
-`env`）、字段说明与常见问题见 **[`docs/CC_SWITCH.md`](docs/CC_SWITCH.md)**：
+### CC-Switch (MCP config manager)
+
+[CC-Switch](https://github.com/farion1231/cc-switch) manages multiple MCP server configs as JSON and switches between them with one click. The complete stdio JSON config (`command` + `env`), field reference, and FAQ live in **[`docs/CC_SWITCH.md`](docs/CC_SWITCH.md)**:
 
 ```json
 {
@@ -233,17 +232,13 @@ server 配置并支持一键切换。完整的 stdio JSON 配置（`command` +
 }
 ```
 
-### 项目级 `.mcp.json`（最可移植）
+### Project-level `.mcp.json` (most portable)
 
-仓库自带 `.mcp.json`（MCP 标准项目级配置），把 hpc server 指向
-`./scripts/hpc-mcp-run`。支持项目级 MCP 的客户端（如 Codex/Reasonix
-从仓库目录启动时）会自动加载，host/root 等通过环境变量注入
-（`${HPC_MCP_HOST}` 等，在 shell profile 定义）。换机器只需：
-clone 仓库 → 安装 hpc-mcp → 定义环境变量 → 从仓库目录启动客户端。
+The repository ships a `.mcp.json` template (standard project-level MCP config). Add an `hpc` entry whose command points at `./scripts/hpc-mcp-run`; MCP clients that support project-level config (such as Codex/Reasonix started from the repository directory) load it automatically. host/root and friends come from environment variables (`${HPC_MCP_HOST}` etc., defined in your shell profile). Moving to another machine is then: clone the repo → install hpc-mcp → define the environment variables → start the client from the repository directory.
 
-### 手动方式（可选）
+### Manual setup (optional)
 
-### Codex
+#### Codex
 
 ```bash
 codex mcp add hpc \
@@ -254,7 +249,7 @@ codex mcp add hpc \
   -- hpc-mcp
 ```
 
-### Reasonix
+#### Reasonix
 
 ```bash
 reasonix mcp add hpc \
@@ -264,49 +259,47 @@ reasonix mcp add hpc \
   hpc-mcp
 ```
 
-两者都是 stdio argv 方式启动，无需 shell。注意手动方式里 `hpc-mcp` 若
-不在 PATH，需换成绝对路径（如 `/path/to/conda/envs/hpc-mcp/bin/hpc-mcp`）。
+Both start a stdio argv process, no shell involved. Note that in the manual form, if `hpc-mcp` is not on PATH you must use an absolute path (e.g. `/path/to/conda/envs/hpc-mcp/bin/hpc-mcp`).
 
-## 工具清单（22 个）
+## Tools (22)
 
-> **每个工具的参数、默认值、约束与返回要点**见 **[docs/TOOLS.md](docs/TOOLS.md)**；
-> 下表只是索引。
+> Per-tool arguments, defaults, constraints, and return values are documented in **[docs/TOOLS.md](docs/TOOLS.md)**; the tables below are just an index.
 
-### 低级原语
+### Low-level primitives
 
-| 工具 | 说明 | annotations |
+| Tool | Purpose | annotations |
 |---|---|---|
-| `hpc.info` | 连接/集群信息（本地路径不暴露） | readOnly |
-| `hpc.files.list` | 列目录（bounded 分页，recursive 逐层 + cursor） | readOnly |
-| `hpc.files.read` | 读文件（bounded slice，单次 ≤256KiB） | readOnly |
-| `hpc.files.write` | 写文件（支持 expected_size/mtime/hash 乐观并发保护） | destructive |
-| `hpc.files.mkdir` | 建目录 | — |
-| `hpc.files.delete` | 删除 | destructive |
-| `hpc.files.upload` | 本地上传（SFTP） | destructive |
-| `hpc.files.download` | 下载到本地（SFTP） | readOnly |
-| `hpc.shell.run_safe` | 白名单轻量命令（带 command cost 预算） | readOnly |
-| `hpc.slurm.submit` | 提交计算作业 | openWorld |
-| `hpc.slurm.status` | 作业状态 | readOnly |
-| `hpc.slurm.queue` | 我的作业队列 | readOnly |
-| `hpc.slurm.output` | 作业 stdout/stderr | readOnly |
-| `hpc.slurm.cancel` | 取消作业 | destructive |
-| `hpc.slurm.accounting` | sacct 记账 | readOnly |
-| `hpc.jobs.wait` | 等待作业完成（有上限） | readOnly |
+| `hpc.info` | connection/cluster info (local paths never exposed) | readOnly |
+| `hpc.files.list` | list a directory (bounded paging; recursive = layer by layer with cursor) | readOnly |
+| `hpc.files.read` | read a file (bounded slice, ≤256 KiB per call) | readOnly |
+| `hpc.files.write` | write a file (supports `expected_size`/`mtime`/`hash` optimistic-concurrency guards) | destructive |
+| `hpc.files.mkdir` | create a directory | — |
+| `hpc.files.delete` | delete | destructive |
+| `hpc.files.upload` | upload from local (SFTP) | destructive |
+| `hpc.files.download` | download to local (SFTP) | readOnly |
+| `hpc.shell.run_safe` | allow-listed lightweight commands (with a command cost budget) | readOnly |
+| `hpc.slurm.submit` | submit a compute job | openWorld |
+| `hpc.slurm.status` | job status | readOnly |
+| `hpc.slurm.queue` | my job queue | readOnly |
+| `hpc.slurm.output` | job stdout/stderr | readOnly |
+| `hpc.slurm.cancel` | cancel a job | destructive |
+| `hpc.slurm.accounting` | sacct accounting | readOnly |
+| `hpc.jobs.wait` | wait for a job to finish (bounded) | readOnly |
 
-### 高阶 Agent 工具
+### High-level agent tools
 
-| 工具 | 说明 | annotations |
+| Tool | Purpose | annotations |
 |---|---|---|
-| `hpc.files.search` | 带预算的正则搜索（定位日志错误行） | readOnly |
-| `hpc.jobs.diagnose` | 一次完成状态+记账+日志尾部+错误签名诊断 | readOnly |
-| `hpc.jobs.wait_and_diagnose` | 等待作业结束并一次诊断 | readOnly |
-| `hpc.project.snapshot` | 一次建立项目上下文（目录概览+git+作业） | readOnly |
-| `hpc.cluster.topo` | 计算节点硬件拓扑（CPU 型号/SIMD/NUMA/cache）+ 并行参数建议 | readOnly, openWorld |
-| `hpc.job.run` | runtime profile 高阶提交（julia/python/moose/bash） | openWorld |
+| `hpc.files.search` | budgeted regex search (locate error lines in logs) | readOnly |
+| `hpc.jobs.diagnose` | state + accounting + log tails + error signatures in one call | readOnly |
+| `hpc.jobs.wait_and_diagnose` | wait for a job to end, then diagnose once | readOnly |
+| `hpc.project.snapshot` | build project context in one call (tree + git + jobs) | readOnly |
+| `hpc.cluster.topo` | compute-node hardware topology (CPU model / SIMD / NUMA / cache) + parallel-parameter advice | readOnly, openWorld |
+| `hpc.job.run` | high-level submit via runtime profiles (julia/python/moose/bash) | openWorld |
 
-### 示例调用
+### Example call
 
-提交 Julia 作业（分区可从 `hpc.info` 返回的允许列表中选择，不指定则取配置的第一个）：
+Submit a Julia job (pick a partition from the allowed list returned by `hpc.info`; omit it to use the first configured one):
 
 ```json
 {
@@ -322,8 +315,7 @@ reasonix mcp add hpc \
 }
 ```
 
-参数默认值来自服务端配置或 `.sh` 脚本的 `#SBATCH` 指令（显式参数优先）；
-分区必须命中配置白名单，否则拒绝。也可以直接提交一个 `.sh` 作业脚本路径：
+Argument defaults come from the server config or the script's `#SBATCH` directives (explicit arguments win); the partition must hit the configured allow-list or the call is denied. You can also submit a `.sh` job-script path directly:
 
 ```json
 {
@@ -334,7 +326,7 @@ reasonix mcp add hpc \
 }
 ```
 
-被拒绝时返回可操作信息：
+A denied call returns something actionable:
 
 ```text
 Operation denied.
@@ -346,11 +338,9 @@ Use:
 hpc.slurm.submit
 ```
 
-## 并行优化参数（`hpc.cluster.topo`）
+## Parallel-tuning parameters (`hpc.cluster.topo`)
 
-登录节点白名单**故意**不放行 `lscpu`/`numactl`，`/proc` 也在路径沙箱之外，
-所以 CPU 型号、SIMD 指令集、NUMA 拓扑这些参数只能从计算节点取。`hpc.cluster.topo`
-把这套流程做成一次调用：
+The login-node allow-list **deliberately** excludes `lscpu`/`numactl`, and `/proc` sits outside the path sandbox — so CPU model, SIMD instruction sets, and NUMA topology can only be read on a compute node. `hpc.cluster.topo` turns that whole dance into a single call:
 
 ```json
 {
@@ -359,56 +349,58 @@ hpc.slurm.submit
 }
 ```
 
-- **第一次调用**（或缓存过期、或 `refresh: true`）提交**一个 1 核采集作业**，
-  在计算节点上读 `lscpu` / `/proc/cpuinfo` / `numactl --hardware` / `/proc/meminfo`，
-  再与登录节点 `sinfo` 的分区视图合并。
-- **返回**：CPU 型号与 sockets/cores/threads、SIMD 指令集（AVX2/AVX-512/SVE）、
-  NUMA 域与距离矩阵、cache 层级、节点内存、分区 features/GRES，以及推导出的
-  并行参数建议（`ntasks_per_node`、`cpus_per_task`、`--hint=nomultithread`、
-  `--cpu-bind=cores`、`OMP_NUM_THREADS`、`-map-by numa`、建议 `--mem`），
-  并附上每一条建议的理由与"物理核 vs 逻辑核"的取舍。
-- **缓存**：`topology.cache_ttl_seconds`（默认 24h）内命中进程内缓存或远端
-  `$ROOT/.hpc-mcp/topo/topology_<partition>.json`，后续会话不会为同一台机器反复排队。
-- **排队中**：采集作业尚未调度时返回 `status: "pending"` + `job_id`；
-  再次调用会复用该作业，不会重复提交。
-- **安全**：采集脚本是**服务端固定内容**（Agent 的任何参数都不进入脚本），
-  且脚本**不查队列**（`squeue`/`sacct`/`scontrol`），只读节点本地硬件事实，
-  符合共享账号隔离规则；作业归属、分区白名单、并发上限照常生效。
-- 管理员可用 `topology.enabled: false` 整个关闭该工具（永不提交采集作业）。
+- **First call** (or expired cache, or `refresh: true`) submits a **one-CPU probe job** that reads `lscpu` / `/proc/cpuinfo` / `numactl --hardware` / `/proc/meminfo` on a compute node, then merges that with the login node's `sinfo` partition view.
+- **Returns**: CPU model with sockets/cores/threads, SIMD instruction sets (AVX2/AVX-512/SVE), NUMA domains and distance matrix, cache levels, node memory, partition features/GRES, plus derived parallel-parameter advice (`ntasks_per_node`, `cpus_per_task`, `--hint=nomultithread`, `--cpu-bind=cores`, `OMP_NUM_THREADS`, `-map-by numa`, suggested `--mem`) with a rationale for each recommendation and the physical-vs-logical-core trade-off.
+- **Caching**: within `topology.cache_ttl_seconds` (default 24 h) results come from the in-process cache or the remote `$ROOT/.hpc-mcp/topo/topology_<partition>.json`, so later sessions never queue the same probe again.
+- **Queued**: while the probe job waits in the queue the call returns `status: "pending"` + `job_id`; calling again reuses that job instead of submitting another.
+- **Safety**: the probe script has **fixed server-side content** (no agent argument is ever interpolated into it) and it **never queries the queue** (`squeue`/`sacct`/`scontrol`) — it only reads node-local hardware facts, so the shared-account isolation rule holds. Job ownership, partition allow-list, and the concurrency ceiling all still apply.
+- Admins can disable the whole tool with `topology.enabled: false` (no probe job will ever be submitted).
 
-## 推荐工作流（Agent）
+## Recommended workflow (agent)
 
-1. `hpc.info` 了解环境 → 2. `hpc.project.snapshot` 一次建立项目上下文 →
-3. 涉及并行/性能时 `hpc.cluster.topo` 一次拿到 CPU/SIMD/NUMA 与推荐并行参数 →
-4. `hpc.files.search` 先定位（日志错误行等），再 `hpc.files.read` 读小段上下文 →
-5. `hpc.files.write` 远程编辑 → 6. 编译/测试/计算一律 `hpc.slurm.submit` →
-7. `hpc.jobs.diagnose` 一次诊断失败作业 → 8. 分析、修改、重复。
+1. `hpc.info` to learn the environment → 2. `hpc.project.snapshot` to build project context in one call →
+3. `hpc.cluster.topo` once when parallelism/performance matters, to get CPU/SIMD/NUMA plus recommended parallel parameters →
+4. `hpc.files.search` to locate things first (e.g. error lines in a log), then `hpc.files.read` for a small slice of context →
+5. `hpc.files.write` to edit remotely → 6. compile/test/compute only through `hpc.slurm.submit` →
+7. `hpc.jobs.diagnose` to diagnose a failed job in one call → 8. analyse, fix, repeat.
 
-原则：**能一次高阶调用完成的，不要拆成多次低级调用**；`hpc.files.read` 是 bounded slice，不要从 offset=0 读到 EOF；重复的只读查询由服务端 TTL 缓存去重。
+Principle: **prefer one high-level call over several low-level ones**; `hpc.files.read` is a bounded slice — do not read from `offset=0` to EOF; repeated read-only queries are deduplicated by the server-side TTL cache.
 
-详见 [`skills/hpc-development/SKILL.md`](skills/hpc-development/SKILL.md)。
+See [`skills/hpc-development/SKILL.md`](skills/hpc-development/SKILL.md) for details.
 
-## 安全测试
+## Security tests
 
 ```bash
 python -m pytest tests/ -q
 ```
 
-覆盖：路径穿越、符号链接逃逸、命令注入、login/compute 边界、Slurm 资源滥用、作业隔离。
+Covering: path traversal, symlink escape, command injection, login/compute boundary, Slurm resource abuse, and job isolation.
 
-完整的发现、修复和残余风险记录见 [`docs/SECURITY_REVIEW.md`](docs/SECURITY_REVIEW.md)，模块边界和请求流程见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+The full list of findings, fixes, and residual risk is in [`docs/SECURITY_REVIEW.md`](docs/SECURITY_REVIEW.md); module boundaries and the request flow are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-## 限制（v1 明确不做）
+## Scope limits (explicitly out of v1)
 
-任意远程 shell、任意 SSH host、sudo、端口转发、多主机、远程常驻 daemon、HTTP MCP、自动凭证管理。
+Arbitrary remote shell, arbitrary SSH hosts, sudo, port forwarding, multi-host setups, remote long-running daemons, HTTP MCP, and automatic credential management.
 
-## 故障排查
+## Troubleshooting
 
-- **启动报 "No HPC host/root configured"**：三种配置方式至少提供 host 与 root。
-- **工具全部 DENY "No Slurm partitions are allowed"**：配置 `slurm.allowed_partitions`（默认空，fail-closed）。
-- **SSH 255 错误**：先用 `hpc-mcp ... --check` 验证；确认 `~/.ssh/config` 与 BatchMode 免密可用。
-- **日志**：写 stderr（stdout 只走 MCP 协议）；`--log-file` 可追加到文件。
+- **"No HPC host/root configured" on startup**: provide at least host and root through one of the three configuration sources.
+- **Every tool DENIED with "No Slurm partitions are allowed"**: configure `slurm.allowed_partitions` (empty by default, fail-closed).
+- **SSH 255 errors**: verify with `hpc-mcp ... --check` first; then confirm `~/.ssh/config` and passwordless BatchMode work.
+- **Logs**: written to stderr (stdout carries the MCP protocol only); `--log-file` appends to a file.
 
-## 许可证
+## Documentation
 
-MIT，见 [LICENSE](LICENSE)。
+| Document | Contents |
+|---|---|
+| [docs/QUICKSTART.md](docs/QUICKSTART.md) | hand-holding install + every flag + troubleshooting table |
+| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | every YAML key, default, range, and environment variable |
+| [docs/TOOLS.md](docs/TOOLS.md) | arguments/defaults/constraints for all 22 tools |
+| [docs/CC_SWITCH.md](docs/CC_SWITCH.md) | CC-Switch JSON config, field reference, FAQ |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | module boundaries, request flow, isolation layers |
+| [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md) | findings, fixes, verification, residual risk |
+| [SECURITY.md](SECURITY.md) | threat model and enforced boundaries |
+
+## License
+
+MIT, see [LICENSE](LICENSE).
