@@ -267,7 +267,10 @@ reasonix mcp add hpc \
 两者都是 stdio argv 方式启动，无需 shell。注意手动方式里 `hpc-mcp` 若
 不在 PATH，需换成绝对路径（如 `/path/to/conda/envs/hpc-mcp/bin/hpc-mcp`）。
 
-## 工具清单（21 个）
+## 工具清单（22 个）
+
+> **每个工具的参数、默认值、约束与返回要点**见 **[docs/TOOLS.md](docs/TOOLS.md)**；
+> 下表只是索引。
 
 ### 低级原语
 
@@ -298,6 +301,7 @@ reasonix mcp add hpc \
 | `hpc.jobs.diagnose` | 一次完成状态+记账+日志尾部+错误签名诊断 | readOnly |
 | `hpc.jobs.wait_and_diagnose` | 等待作业结束并一次诊断 | readOnly |
 | `hpc.project.snapshot` | 一次建立项目上下文（目录概览+git+作业） | readOnly |
+| `hpc.cluster.topo` | 计算节点硬件拓扑（CPU 型号/SIMD/NUMA/cache）+ 并行参数建议 | readOnly, openWorld |
 | `hpc.job.run` | runtime profile 高阶提交（julia/python/moose/bash） | openWorld |
 
 ### 示例调用
@@ -342,12 +346,43 @@ Use:
 hpc.slurm.submit
 ```
 
+## 并行优化参数（`hpc.cluster.topo`）
+
+登录节点白名单**故意**不放行 `lscpu`/`numactl`，`/proc` 也在路径沙箱之外，
+所以 CPU 型号、SIMD 指令集、NUMA 拓扑这些参数只能从计算节点取。`hpc.cluster.topo`
+把这套流程做成一次调用：
+
+```json
+{
+  "tool": "hpc.cluster.topo",
+  "arguments": { "partition": "thcp1" }
+}
+```
+
+- **第一次调用**（或缓存过期、或 `refresh: true`）提交**一个 1 核采集作业**，
+  在计算节点上读 `lscpu` / `/proc/cpuinfo` / `numactl --hardware` / `/proc/meminfo`，
+  再与登录节点 `sinfo` 的分区视图合并。
+- **返回**：CPU 型号与 sockets/cores/threads、SIMD 指令集（AVX2/AVX-512/SVE）、
+  NUMA 域与距离矩阵、cache 层级、节点内存、分区 features/GRES，以及推导出的
+  并行参数建议（`ntasks_per_node`、`cpus_per_task`、`--hint=nomultithread`、
+  `--cpu-bind=cores`、`OMP_NUM_THREADS`、`-map-by numa`、建议 `--mem`），
+  并附上每一条建议的理由与"物理核 vs 逻辑核"的取舍。
+- **缓存**：`topology.cache_ttl_seconds`（默认 24h）内命中进程内缓存或远端
+  `$ROOT/.hpc-mcp/topo/topology_<partition>.json`，后续会话不会为同一台机器反复排队。
+- **排队中**：采集作业尚未调度时返回 `status: "pending"` + `job_id`；
+  再次调用会复用该作业，不会重复提交。
+- **安全**：采集脚本是**服务端固定内容**（Agent 的任何参数都不进入脚本），
+  且脚本**不查队列**（`squeue`/`sacct`/`scontrol`），只读节点本地硬件事实，
+  符合共享账号隔离规则；作业归属、分区白名单、并发上限照常生效。
+- 管理员可用 `topology.enabled: false` 整个关闭该工具（永不提交采集作业）。
+
 ## 推荐工作流（Agent）
 
 1. `hpc.info` 了解环境 → 2. `hpc.project.snapshot` 一次建立项目上下文 →
-3. `hpc.files.search` 先定位（日志错误行等），再 `hpc.files.read` 读小段上下文 →
-4. `hpc.files.write` 远程编辑 → 5. 编译/测试/计算一律 `hpc.slurm.submit` →
-6. `hpc.jobs.diagnose` 一次诊断失败作业 → 7. 分析、修改、重复。
+3. 涉及并行/性能时 `hpc.cluster.topo` 一次拿到 CPU/SIMD/NUMA 与推荐并行参数 →
+4. `hpc.files.search` 先定位（日志错误行等），再 `hpc.files.read` 读小段上下文 →
+5. `hpc.files.write` 远程编辑 → 6. 编译/测试/计算一律 `hpc.slurm.submit` →
+7. `hpc.jobs.diagnose` 一次诊断失败作业 → 8. 分析、修改、重复。
 
 原则：**能一次高阶调用完成的，不要拆成多次低级调用**；`hpc.files.read` 是 bounded slice，不要从 offset=0 读到 EOF；重复的只读查询由服务端 TTL 缓存去重。
 

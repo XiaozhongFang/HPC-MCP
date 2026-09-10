@@ -13,6 +13,7 @@ server.py (dispatch, runtime argument shape, audit, lifecycle)
    |       |
    |       +--> security/* (pure policy decisions)
    |       +--> filesystem / shell / slurm services
+   |       +--> cluster/topology.py (compute-node probe job + sinfo, cached)
    |
    +--> ssh/manager.py and ssh/sftp.py (fixed argv, bounded processes)
                |
@@ -72,6 +73,17 @@ data into the MCP process at all*:
 - **High-level tools.** `hpc.jobs.diagnose` (state + accounting + bounded tails
   + error signatures) and `hpc.project.snapshot` (bounded tree + git summary +
   tracked jobs) collapse several low-level calls into one, each query bounded.
+- **Topology discovery.** `hpc.cluster.topo` combines a `sinfo` summary (already
+  allow-listed, scoped to `-p <allowed partitions>` so unauthorized partitions
+  never reach the response) with a **fixed, server-generated** probe script run
+  as a one-CPU job on a compute node. No tool argument is interpolated into that
+  script, and the script reads node-local files only -- it never queries
+  `squeue`/`sacct`/`scontrol`, so the shared-account isolation rule holds on the
+  compute side too. Results are cached in-process and as a JSON file under
+  `$ROOT/.hpc-mcp/topo/` for `topology.cache_ttl_seconds` (default 24 h), which
+  keeps a queued probe job from being re-submitted per call; a probe still
+  waiting after `topology.wait_seconds` answers `status: "pending"` and is
+  reused (or, eventually, cancelled) rather than duplicated.
 - **Query cache.** Idempotent read-only tools dedupe on `tool + normalized
   args` for `cache_ttl_seconds` (default 2 s, 0 disables); any mutating tool
   invalidates the whole cache.

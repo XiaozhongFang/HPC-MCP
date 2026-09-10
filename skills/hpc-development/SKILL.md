@@ -12,7 +12,7 @@ description: 在远程 HPC 集群上安全地进行科研计算开发（Julia/MO
 1. **登录节点不做计算**。`julia`、`python`、`make`、`cmake --build`、`mpirun`、`pytest`、大型测试——一律走 `hpc.slurm.submit`。
 2. **只碰 `$HPC_MCP_ROOT` 内的路径**。`../`、符号链接出界、其他用户目录都会被拒。用 `hpc.info` 查看 root。
 3. **不要自己构造 SSH/SCP 命令**；用 `hpc.files.*` 工具传输和读写。
-4. `hpc.shell.run_safe` 仅限轻量查询（`ls`、`cat`、`git status/diff/log`、`module list` 等），不支持管道/重定向/命令串联；`squeue`/`sacct`/`scontrol` 必须通过带归属检查的 Slurm 工具查询。
+4. `hpc.shell.run_safe` 仅限轻量查询（`ls`、`cat`、`git status/diff/log`、`module list` 等），不支持管道/重定向/命令串联；`squeue`/`sacct`/`scontrol` 必须通过带归属检查的 Slurm 工具查询。`lscpu`/`numactl` 等硬件查询也不在登录节点白名单内——要并行/性能参数请用 `hpc.cluster.topo`（它会在计算节点采集）。
 5. 文件传输只能使用配置的 `local_root` 与远程 `HPC_MCP_ROOT`；不要上传 `.ssh`、私钥或符号链接。
 
 ## 标准工作流（优先远程直接操作）
@@ -62,6 +62,29 @@ description: 在远程 HPC 集群上安全地进行科研计算开发（Julia/MO
 ```
 
 `hpc.slurm.submit` 保留给需要完整 argv 控制的专家。
+
+### 并行/性能调优：先取拓扑，不要猜硬件
+
+要决定 `ntasks_per_node`、`cpus_per_task`、MPI 绑定、`OMP_NUM_THREADS` 或编译期
+`-march` 之前，**先用一次 `hpc.cluster.topo` 拿真实硬件参数**，不要凭集群名字或惯例猜：
+
+```json
+{
+  "tool": "hpc.cluster.topo",
+  "arguments": { "partition": "thcp1" }
+}
+```
+
+- 返回 CPU 型号、sockets × cores × threads、SIMD 指令集（AVX2/AVX-512/SVE）、
+  NUMA 域与距离、cache 层级、节点内存、分区 features/GRES，以及推导好的
+  `recommended_parallel_parameters`（纯 MPI / 混合 MPI+OpenMP / 纯 OpenMP 三套）。
+- 第一次调用会在该分区提交一个 **1 核采集作业**（服务端固定脚本，只读节点本地硬件，
+  不查队列），结果按 TTL 缓存（默认 24h），后续调用不会重复排队。
+- 若返回 `status: "pending"`，说明采集作业还在排队：稍后**再次调用同一工具**即可
+  （会复用那个 `job_id`，**不要**自己重新提交采集作业）。
+- 只把 `recommended_parallel_parameters` 当**起点**：它是按物理核/NUMA 域推导的启发式，
+  真正的调优仍要跑基准并对比（`hpc.job.run` 提交不同 rank/线程组合，用
+  `hpc.jobs.wait_and_diagnose` 收结果）。
 
 ### 写保护
 

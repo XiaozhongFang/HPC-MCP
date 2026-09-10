@@ -15,6 +15,7 @@ import mcp.types as types
 
 from . import __version__
 from .cache import QueryCache
+from .cluster.topology import TopologyService
 from .config import Config
 from .errors import HpcMcpError
 from .filesystem.service import FileService
@@ -63,8 +64,9 @@ def create_server(cfg: Config) -> tuple[Server, list[ToolDef]]:
     safe_exec = SafeExec(cfg, ssh)
     tracker = JobTracker(cfg, ssh)
     slurm = SlurmManager(cfg, ssh, tracker)
+    topology = TopologyService(cfg, files, safe_exec, slurm)
 
-    tools = build_tools(cfg, ssh, files, transfer, safe_exec, slurm)
+    tools = build_tools(cfg, ssh, files, transfer, safe_exec, slurm, topology=topology)
     by_name = {t.name: t for t in tools}
 
     server: Server = Server("hpc-mcp", version=__version__)

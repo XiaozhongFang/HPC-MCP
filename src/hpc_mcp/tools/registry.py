@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from ..config import Config
+from ..cluster.topology import TopologyService
 from ..errors import PolicyDenied
 from ..filesystem.search import FileSearchService
 from ..filesystem.service import FileService
@@ -91,6 +92,7 @@ def build_tools(
     slurm: SlurmManager,
     search: FileSearchService | None = None,
     projects: ProjectService | None = None,
+    topology: TopologyService | None = None,
 ) -> list[ToolDef]:
     root = cfg.root
     search_svc = search or FileSearchService(cfg, ssh)
@@ -825,5 +827,56 @@ def build_tools(
             idempotent=True,
         )
     )
+
+    # -------------------------------------------------------------- topology
+    if cfg.topology.enabled:
+        topo_svc = topology or TopologyService(cfg, files, safe_exec, slurm)
+
+        async def cluster_topo(args: dict) -> Any:
+            return await topo_svc.probe(
+                partition=_str_arg(args, "partition", required=False),
+                refresh=_bool_arg(args, "refresh", default=False),
+            )
+
+        tools.append(
+            ToolDef(
+                name="hpc.cluster.topo",
+                description=(
+                    "Discover the real compute-node hardware and Slurm view needed for "
+                    "parallel-optimization decisions: CPU model/vendor, sockets x cores x "
+                    "threads, SIMD capability (AVX2/AVX-512/SVE), NUMA domains + distances, "
+                    "cache hierarchy, node memory, and the partition's nodes/features/GRES. "
+                    "It also returns recommended parallel parameters (ntasks_per_node, "
+                    "cpus_per_task, --cpu-bind/--hint flags, OMP_NUM_THREADS) with the "
+                    "reasoning behind them. The login node cannot answer this (lscpu/numactl "
+                    "are not whitelisted there), so the first call -- or any call after the "
+                    "cache expires, or with refresh=true -- submits ONE tiny probe job "
+                    f"(1 CPU, at most {cfg.topology.collect_time_limit} wall time) on the chosen "
+                    "partition and parses its output. Results are cached (session + a JSON file "
+                    "under the user root, default 24h), so repeated calls do NOT queue new jobs. If the "
+                    "probe is still queued the call returns status='pending' with the job_id; "
+                    "call it again later to pick that job up instead of submitting another."
+                ),
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "partition": _str(
+                            "partition",
+                            "Partition to probe (default: the first partition in the server allow-list)",
+                        ),
+                        "refresh": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "Force a new probe job, ignoring cached topology",
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+                handler=cluster_topo,
+                read_only=True,
+                idempotent=True,
+                open_world=True,
+            )
+        )
 
     return tools

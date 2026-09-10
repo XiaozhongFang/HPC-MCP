@@ -75,6 +75,18 @@ DEFAULT_SLURM_MAX_TIME = "24:00:00"
 DEFAULT_MAX_CONCURRENT_JOBS = 20
 DEFAULT_WAIT_MAX_SECONDS = 3600
 DEFAULT_MAX_OUTPUT_BYTES = 1 * 1024 * 1024
+#: hpc.cluster.topo: register the tool at all (false = the probe job can
+#: never be submitted, and the tool is not advertised to the agent).
+DEFAULT_TOPOLOGY_ENABLED = True
+#: How long a collected topology stays fresh (24 h).  CPU/NUMA/cache facts
+#: change only on hardware or OS upgrades, so a long TTL keeps the probe job
+#: off the queue for the common case.
+DEFAULT_TOPOLOGY_CACHE_TTL_SECONDS = 24 * 3600
+#: Seconds to wait for the probe job before answering "pending" (the job
+#: keeps running and is picked up by the next call).
+DEFAULT_TOPOLOGY_WAIT_SECONDS = 300
+#: Slurm time limit requested for the probe job itself (it only runs lscpu).
+DEFAULT_TOPOLOGY_COLLECT_TIME_LIMIT = "00:03:00"
 
 
 @dataclass
@@ -138,6 +150,30 @@ class FilesConfig:
 
 
 @dataclass
+class TopologyConfig:
+    """Settings for ``hpc.cluster.topo`` (compute-node topology discovery).
+
+    The tool answers "what hardware will my job actually run on?" -- CPU
+    model, sockets/cores/threads, SIMD capability, NUMA domains, cache
+    hierarchy -- which the login-node whitelist deliberately cannot answer.
+    The hardware half comes from a fixed, server-generated probe script run
+    as a tiny one-CPU job on a compute node; the Slurm half comes from
+    ``sinfo`` on the login node.
+    """
+
+    #: Register the tool at all.  False hides it from the agent and makes a
+    #: probe job impossible (for clusters that forbid even trivial jobs).
+    enabled: bool = DEFAULT_TOPOLOGY_ENABLED
+    #: Freshness window for a collected topology (remote JSON cache and the
+    #: in-process cache).  0 disables caching, so every call probes again.
+    cache_ttl_seconds: int = DEFAULT_TOPOLOGY_CACHE_TTL_SECONDS
+    #: Max seconds to wait for the probe job before answering ``pending``.
+    wait_seconds: int = DEFAULT_TOPOLOGY_WAIT_SECONDS
+    #: Slurm time limit requested for the probe job.
+    collect_time_limit: str = DEFAULT_TOPOLOGY_COLLECT_TIME_LIMIT
+
+
+@dataclass
 class Config:
     """Top-level server configuration."""
 
@@ -146,6 +182,7 @@ class Config:
     slurm: SlurmConfig = field(default_factory=SlurmConfig)
     shell: ShellConfig = field(default_factory=ShellConfig)
     files: FilesConfig = field(default_factory=FilesConfig)
+    topology: TopologyConfig = field(default_factory=TopologyConfig)
     wait_max_seconds: int = DEFAULT_WAIT_MAX_SECONDS
     log_file: str | None = None
     log_level: str = "INFO"
@@ -223,6 +260,21 @@ def _bounded_int(value: Any, name: str, *, minimum: int = 1, maximum: int = 2**3
     if not isinstance(value, int) or not (minimum <= value <= maximum):
         raise ConfigError(f"{name} must be an integer between {minimum} and {maximum}, got {value!r}")
     return value
+
+
+def _bool_value(value: Any, name: str) -> bool:
+    """Parse a boolean config value (true/false/yes/no/on/off/1/0)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return value == 1
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    raise ConfigError(f"{name} must be a boolean (true/false), got {value!r}")
 
 
 #: Arithmetic expressions (e.g. "4*16", "256/2", "8*(2+1)") are allowed in
@@ -339,6 +391,7 @@ _KNOWN_KEYS: dict[str, frozenset[str]] = {
             "slurm",
             "shell",
             "files",
+            "topology",
             "wait_max_seconds",
             "cache_ttl_seconds",
             "log_file",
@@ -376,6 +429,9 @@ _KNOWN_KEYS: dict[str, frozenset[str]] = {
         }
     ),
     "shell": frozenset({"safe_commands", "max_exec_seconds", "max_output_bytes"}),
+    "topology": frozenset(
+        {"enabled", "cache_ttl_seconds", "wait_seconds", "collect_time_limit"}
+    ),
     "files": frozenset(
         {
             "max_read_bytes", "max_write_bytes", "max_list_entries", "max_read_slice_bytes",
@@ -628,6 +684,45 @@ def build_config(cli_args: Any | None = None, environ: dict[str, str] | None = N
     shell_cfg.max_exec_seconds = _bounded_int(shell_cfg.max_exec_seconds, "shell.max_exec_seconds", maximum=86400)
     shell_cfg.max_output_bytes = _bounded_int(shell_cfg.max_output_bytes, "shell.max_output_bytes", maximum=2**31 - 1)
 
+    # -- Topology (hpc.cluster.topo) ---------------------------------------
+    topology_file = _mapping(file_data, "topology")
+    topology = TopologyConfig(
+        enabled=_bool_value(
+            _coalesce(_env("TOPOLOGY_ENABLED", env), topology_file.get("enabled"), default=DEFAULT_TOPOLOGY_ENABLED),
+            "topology.enabled",
+        ),
+        cache_ttl_seconds=_bounded_int(
+            _coalesce(
+                _env_int("TOPOLOGY_CACHE_TTL_SECONDS", env),
+                topology_file.get("cache_ttl_seconds"),
+                default=DEFAULT_TOPOLOGY_CACHE_TTL_SECONDS,
+            ),
+            "topology.cache_ttl_seconds", minimum=0, maximum=30 * 86400,
+        ),
+        wait_seconds=_bounded_int(
+            _coalesce(
+                _env_int("TOPOLOGY_WAIT_SECONDS", env),
+                topology_file.get("wait_seconds"),
+                default=DEFAULT_TOPOLOGY_WAIT_SECONDS,
+            ),
+            "topology.wait_seconds", maximum=7 * 86400,
+        ),
+        collect_time_limit=str(
+            _coalesce(
+                _env("TOPOLOGY_COLLECT_TIME_LIMIT", env),
+                topology_file.get("collect_time_limit"),
+                default=DEFAULT_TOPOLOGY_COLLECT_TIME_LIMIT,
+            )
+        ),
+    )
+    try:
+        if parse_time_limit(topology.collect_time_limit) <= 0:
+            raise ConfigError("topology.collect_time_limit must be positive")
+    except ConfigError:
+        raise
+    except Exception as exc:
+        raise ConfigError(f"Invalid topology.collect_time_limit: {topology.collect_time_limit!r}") from exc
+
     wait_max = _coalesce(_env_int("WAIT_MAX_SECONDS", env), file_data.get("wait_max_seconds"), default=DEFAULT_WAIT_MAX_SECONDS)
     wait_max = _bounded_int(wait_max, "wait_max_seconds", maximum=7 * 86400)
 
@@ -682,6 +777,7 @@ def build_config(cli_args: Any | None = None, environ: dict[str, str] | None = N
         slurm=slurm,
         shell=shell_cfg,
         files=files,
+        topology=topology,
         wait_max_seconds=int(wait_max),
         cache_ttl_seconds=float(cache_ttl),
         log_file=log_file,

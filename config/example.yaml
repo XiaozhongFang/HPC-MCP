@@ -55,6 +55,14 @@ files:
   search_max_depth: 6
   search_timeout: 5
 
+# 计算节点拓扑发现（hpc.cluster.topo）：CPU 型号/SIMD/NUMA/cache + 并行参数建议。
+# 第一次调用会提交一个 1 核采集作业（服务端固定脚本，不读队列信息），结果缓存。
+topology:
+  enabled: true              # false = 不注册该工具，永不提交采集作业
+  cache_ttl_seconds: 86400   # 拓扑新鲜期（24h）；0 = 每次都重新采集
+  wait_seconds: 300          # 采集作业等待上限，超时返回 pending + job_id
+  collect_time_limit: "00:03:00"
+
 # 只读查询去重缓存 TTL（秒）；0 禁用
 cache_ttl_seconds: 2.0
 

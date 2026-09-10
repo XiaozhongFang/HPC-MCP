@@ -12,6 +12,9 @@
 > 未识别的键不会报错，只会打一行
 > `Ignoring unknown config key 'xxx'` 警告后忽略——看到这行就说明有拼写错误。
 
+> 本文件说明**服务端配置参数**。启动/自检用的 CLI 参数见
+> [QUICKSTART.md](QUICKSTART.md) 第 4 节；**每个 MCP 工具的参数**见 [TOOLS.md](TOOLS.md)。
+
 ---
 
 ## 顶层参数
@@ -63,7 +66,7 @@
 | `max_memory_mb` | int | `262144`（256 GiB） | 单作业内存上限（MiB，≥ 1）。`HPC_MCP_MAX_MEMORY_MB` |
 | `max_gpus` | int | `4` | 单作业 GPU 上限（≥ 0）。`HPC_MCP_MAX_GPUS` |
 | `max_time` | string | `"24:00:00"` | 单作业时长上限。Slurm 格式：`HH:MM:SS`、`D-HH:MM:SS`；天数可溢出（`"2-24:00:00"` = 3 天）。`HPC_MCP_MAX_TIME` |
-| `max_concurrent_jobs` | int | `20` | **同时活跃的最大作业数**。提交时检查该实例注册表里「squeue 或 sacct 均非终止态」的作业数，达到上限即拒绝新提交并提示等待。已结束（`COMPLETED`/`FAILED`/`CANCELLED`/…）的作业自动释放名额。`HPC_MCP_MAX_CONCURRENT_JOBS` |
+| `max_concurrent_jobs` | int | `20` | **同时活跃的最大作业数**。提交时检查该实例注册表里「squeue 或 sacct 均非终止态」的作业数，达到上限即拒绝新提交并提示等待。已结束（`COMPLETED`/`FAILED`/`CANCELLED`/…）的作业自动释放名额；squeue 查询成功但作业已不在队列、且 sacct 也已无记录时同样释放（避免 accounting 记录过期后永久占满配额）；squeue 查询失败时保守地继续计数（fail-closed）。`HPC_MCP_MAX_CONCURRENT_JOBS` |
 
 > 所有 `max_*` 数字字段都支持简单算术表达式：`+ - * /` 与括号，如 `"4*16"`、`"128/4"`。
 > 环境变量中同样支持（如 `HPC_MCP_MAX_CPUS=4*16`）。
@@ -95,6 +98,32 @@
 | `search_max_files` | int | `1000` | 一次搜索最多扫描文件数（≤ 1000000）。`HPC_MCP_SEARCH_MAX_FILES` |
 | `search_max_depth` | int | `6` | 搜索递归深度上限（≤ 64）。`HPC_MCP_SEARCH_MAX_DEPTH` |
 | `search_timeout` | int | `5` | 远端单次搜索超时（秒，≤ 3600）。`HPC_MCP_SEARCH_TIMEOUT` |
+
+---
+
+## `topology:` 子段
+
+控制 `hpc.cluster.topo`（计算节点硬件/NUMA/SIMD 拓扑发现）。该工具第一次调用
+（或缓存过期、或 `refresh=true`）会在指定分区提交**一个 1 核的采集作业**，
+在计算节点上读取 `lscpu`/`/proc/cpuinfo`/`numactl --hardware`/`/proc/meminfo`，
+并与登录节点 `sinfo` 的分区/节点视图合并，返回 CPU 型号、sockets/cores/threads、
+SIMD 指令集、NUMA 域与距离、cache 层级、节点内存，以及推导出的并行参数建议
+（`ntasks_per_node`、`cpus_per_task`、`--cpu-bind`/`--hint`、`OMP_NUM_THREADS`）。
+
+采集脚本是**服务端固定内容**：Agent 提供的任何参数都不会写进脚本，脚本也
+**不会**调用 `squeue`/`sacct`/`scontrol`（共享账号隔离），只读节点本地硬件事实。
+
+| 键 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `enabled` | bool | `true` | 是否注册 `hpc.cluster.topo`。设为 `false` 时该工具不暴露给 Agent，也就永远不会提交采集作业。`HPC_MCP_TOPOLOGY_ENABLED` |
+| `cache_ttl_seconds` | int | `86400`（24 h） | 拓扑结果的新鲜期：进程内缓存 + 远端 `$ROOT/.hpc-mcp/topo/topology_<partition>.json` 共用该 TTL，避免重复排队。`0` = 每次调用都重新采集。`HPC_MCP_TOPOLOGY_CACHE_TTL_SECONDS` |
+| `wait_seconds` | int | `300` | 等待采集作业结束的秒数；超时返回 `status: "pending"` 与 `job_id`（作业继续排队，下次调用复用它，不会重复提交）。`HPC_MCP_TOPOLOGY_WAIT_SECONDS` |
+| `collect_time_limit` | string | `"00:03:00"` | 采集作业自身的 Slurm 时长上限（格式同 `slurm.max_time`）。`HPC_MCP_TOPOLOGY_COLLECT_TIME_LIMIT` |
+
+> 采集作业同样受 `slurm.allowed_partitions`、`max_concurrent_jobs` 与作业归属
+> 规则约束；`allowed_partitions` 为空时该工具 fail-closed（拒绝调用）。
+> 探到的分区名会用于 `sinfo -p <分区>` 与缓存文件名，因此比通用 Slurm 策略更严：
+> 只接受 `[A-Za-z0-9_.-]`。
 
 ---
 
@@ -143,6 +172,12 @@ files:
   search_max_files: 1000
   search_max_depth: 6
   search_timeout: 5
+
+topology:
+  enabled: true                     # false = 不注册 hpc.cluster.topo（永不提交采集作业）
+  cache_ttl_seconds: 86400          # 拓扑新鲜期（24h）；0 = 每次都重新采集
+  wait_seconds: 300                 # 采集作业排队等待上限，超时返回 pending
+  collect_time_limit: "00:03:00"    # 采集作业自身的 Slurm 时长上限
 
 wait_max_seconds: 3600
 cache_ttl_seconds: 2.0

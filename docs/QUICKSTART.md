@@ -179,6 +179,11 @@ hpc-mcp \
 
 ## 4. 参数说明
 
+> 这一节只列**启动/自检相关**的 CLI 参数。完整的配置文件参数（含
+> `slurm.*`、`files.*`、`topology.*` 及全部环境变量）见
+> [CONFIGURATION.md](CONFIGURATION.md)；**每个 MCP 工具的参数**见
+> [TOOLS.md](TOOLS.md)。
+
 | 参数 | 作用 | 环境变量 | 是否必填 |
 |---|---|---|---|
 | `--host` | HPC 主机（IP 或 `~/.ssh/config` 别名） | `HPC_MCP_HOST` | **必填** |
@@ -191,6 +196,17 @@ hpc-mcp \
 | `--sftp-bin` | sftp 可执行文件路径（形式同 `--ssh-bin`） | `HPC_MCP_SFTP_BIN` | 可选 |
 | `--config` | YAML 配置文件路径 | — | 可选 |
 | `--check` | 只验证连通性然后退出 | — | 可选 |
+| `--log-file` | 日志追加写入的文件（同时仍写 stderr） | `HPC_MCP_LOG_FILE` | 可选 |
+| `--log-level` | 日志级别：`DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`（默认 `INFO`） | `HPC_MCP_LOG_LEVEL` | 可选 |
+| `--version` | 打印版本并退出 | — | 可选 |
+
+子命令 `hpc-mcp mcp-add`（自动写入 Codex / Reasonix 的 MCP 配置，幂等，不破坏已有配置）：
+
+| 参数 | 作用 | 默认 |
+|---|---|---|
+| `--client` | 要更新的客户端：`codex`、`reasonix`、`all` | `all` |
+| `--config` | YAML 配置路径（其中的 host/root 等会被写入客户端 env） | — |
+| `--host` / `--user` / `--root` | 直接传参（不通过配置文件时使用） | — |
 
 **关于 `--local-root`**：它限制 `hpc.files.upload`/`download` 能访问的**本地**目录范围，防止 Agent 读你本地的 `.ssh` 等敏感目录。一般设为当前项目目录（`$PWD`）即可。**它不是必填**，不传就默认当前目录。
 
@@ -217,6 +233,11 @@ slurm:
   max_cpus: 64
   max_nodes: 2
   max_time: "24:00:00"
+
+# 可选：计算节点拓扑探测（hpc.cluster.topo 用）
+# topology:
+#   enabled: true             # false = 不注册该工具，永不提交采集作业
+#   cache_ttl_seconds: 86400  # 拓扑缓存 24h
 EOF
 ```
 
