@@ -53,12 +53,8 @@ class FakeSnapSsh:
         return RemoteResult(stdout=b"", stderr=b"", exit_code=0)
 
     async def run_raw(self, cmd, *, stdin_text=None, **kw):
-        import re as _re
-
-        if "tracked_jobs.json" in cmd and "HPCMCP_EOF" in cmd:
-            m = _re.search(r"HPCMCP_EOF'?\n(.*?)\nHPCMCP_EOF", cmd, _re.S)
-            if m:
-                self.register = json.loads(m.group(1))
+        if "tracked_jobs.json" in cmd and stdin_text is not None:
+            self.register = json.loads(stdin_text)
             return RemoteResult(stdout=b"", stderr=b"", exit_code=0)
         # safe_exec runs `env -i ... git ...` through run_raw
         if "git rev-parse" in cmd:

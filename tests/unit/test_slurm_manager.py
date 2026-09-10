@@ -27,6 +27,12 @@ class FakeSsh:
         self.next_job_id = "424242"
         self.outputs: dict[str, str] = {}
         self.scripts: dict[str, str] = {}
+        self.squeue_fails = False  # simulate a squeue probe that could not run
+        # When set, the registry write fails with this result (lock contention,
+        # stale lock, unwritable metadata dir, ...).
+        self.register_write_error: RemoteResult | None = None
+        self.scancel_fails = False  # simulate a rollback that could not run
+        self.sacct_omits: set[str] = set()  # ids accounting has no record for
 
     async def realpath(self, path):
         return path
@@ -34,6 +40,8 @@ class FakeSsh:
     async def run(self, argv, *, timeout=None, max_output=4 * 1024 * 1024, check=True):
         import json, re as _re
         if argv[0] == "sh" and "tracked_jobs.json" in argv[-1] and "HPCMCP_EOF" in argv[-1]:
+            if self.register_write_error is not None:
+                return self.register_write_error
             m = _re.search(r"HPCMCP_EOF'?\n(.*?)\nHPCMCP_EOF", argv[-1], _re.S)
             if m:
                 self.register = json.loads(m.group(1))
@@ -41,6 +49,8 @@ class FakeSsh:
         if argv[:2] == ["cat", f"{ROOT}/.hpc-mcp/tracked_jobs.json"]:
             return RemoteResult(stdout=json.dumps(self.register).encode(), stderr=b"", exit_code=0)
         if argv[0] == "squeue":
+            if self.squeue_fails:
+                return RemoteResult(stdout=b"", stderr=b"slurm_load_jobs error", exit_code=1)
             if "-j" in argv:
                 jid = argv[argv.index("-j") + 1]
                 out = f"{jid}\n" if jid in self.states else ""
@@ -49,9 +59,15 @@ class FakeSsh:
             return RemoteResult(stdout=("\n".join(lines)).encode(), stderr=b"", exit_code=0)
         if argv[0] == "sacct":
             jids = argv[2].split(",")
-            out = "".join(f"{j}|{self.states.get(j, 'COMPLETED')}|0:0\n" for j in jids)
+            out = "".join(
+                f"{j}|{self.states.get(j, 'COMPLETED')}|0:0\n"
+                for j in jids
+                if j not in self.sacct_omits
+            )
             return RemoteResult(stdout=out.encode(), stderr=b"", exit_code=0)
         if argv[0] == "scancel":
+            if self.scancel_fails:
+                return RemoteResult(stdout=b"", stderr=b"scancel: error", exit_code=1)
             self.states[argv[-1]] = "CANCELLED"
             return RemoteResult(stdout=b"", stderr=b"", exit_code=0)
         if argv[0] == "cat" and "--" in argv:
@@ -74,11 +90,11 @@ class FakeSsh:
         return RemoteResult(stdout=b"", stderr=b"", exit_code=0)
 
     async def run_raw(self, cmd, *, stdin_text=None, **kw):
-        import json, re as _re
-        if "tracked_jobs.json" in cmd and "HPCMCP_EOF" in cmd:
-            m = _re.search(r"HPCMCP_EOF'?\n(.*?)\nHPCMCP_EOF", cmd, _re.S)
-            if m:
-                self.register = json.loads(m.group(1))
+        import json
+        if "tracked_jobs.json" in cmd and stdin_text is not None:
+            if self.register_write_error is not None:
+                return self.register_write_error
+            self.register = json.loads(stdin_text)
             return RemoteResult(stdout=b"", stderr=b"", exit_code=0)
         if "sbatch" in cmd:
             self.submitted_scripts.append(stdin_text or "")
@@ -103,6 +119,41 @@ class TestSubmit:
         assert "julia --project=. t.jl" in ssh.submitted_scripts[0]
         assert f"#SBATCH --output={ROOT}/.hpc-mcp/jobs/%j.stdout.log" in ssh.submitted_scripts[0]
         assert ssh.register["424242"]["job_name"] == "t"
+
+    async def test_registry_failure_rolls_back_job_and_says_so(self):
+        """A job that cannot be registered is cancelled -- and the error says so.
+
+        The submission has already reached Slurm at this point, so the error
+        must report the rollback instead of leaving the agent hunting for a job
+        that is already gone.
+        """
+        ssh = FakeSsh()
+        ssh.register_write_error = RemoteResult(
+            stdout=b"",
+            stderr=b"tracked-jobs lock is busy: /x/.hpc-mcp/tracked_jobs.json.lock",
+            exit_code=1,
+        )
+        mgr = SlurmManager(make_cfg(), ssh, JobTracker(make_cfg(), ssh))
+        with pytest.raises(RemoteCommandError) as excinfo:
+            await mgr.submit(job_name="t", working_directory=ROOT, command=["ls"])
+        assert ssh.states["424242"] == "CANCELLED"
+        message = excinfo.value.user_message
+        assert "424242" in message
+        assert "cancelled" in message
+        assert "tracked_jobs.json.lock" in message
+
+    async def test_registry_failure_reports_failed_rollback(self):
+        """If even the rollback fails, the queue state is reported honestly."""
+        ssh = FakeSsh()
+        ssh.register_write_error = RemoteResult(stdout=b"", stderr=b"boom", exit_code=1)
+        ssh.scancel_fails = True
+        mgr = SlurmManager(make_cfg(), ssh, JobTracker(make_cfg(), ssh))
+        with pytest.raises(RemoteCommandError) as excinfo:
+            await mgr.submit(job_name="t", working_directory=ROOT, command=["ls"])
+        message = excinfo.value.user_message
+        assert "may still be queued" in message
+        assert "not manageable" in message
+        assert "boom" in message  # the original failure is not masked by scancel
 
     async def test_submit_defaults_working_dir_to_root(self):
         """When working_directory is omitted the user root is used."""
@@ -358,8 +409,49 @@ class TestConcurrencyCounting:
         await mgr.submit(job_name="old", working_directory=ROOT, command=["ls"])
         # job finished: it disappears from squeue, sacct keeps the terminal state
         ssh.states.clear()
-        active = await mgr._tracker.count_active(await mgr._queue_states())
+        states, queue_ok = await mgr._queue_states()
+        active = await mgr._tracker.count_active(states, queue_ok=queue_ok)
+        assert queue_ok is True
         assert active == 0
+
+    async def test_ghost_entry_released_when_both_probes_agree(self):
+        """Neither squeue nor sacct knows the job: it must not hold a slot."""
+        ssh = FakeSsh()
+        mgr = self._mgr(ssh)
+        res = await mgr.submit(job_name="ghost", working_directory=ROOT, command=["ls"])
+        ssh.states.clear()  # left the queue
+        ssh.sacct_omits = {res["job_id"]}  # accounting record already purged
+        states, queue_ok = await mgr._queue_states()
+        active = await mgr._tracker.count_active(states, queue_ok=queue_ok)
+        assert queue_ok is True
+        assert active == 0
+        # the ownership record survives, only the quota slot is freed
+        assert res["job_id"] in {e["job_id"] for e in await mgr._tracker.list_mine()}
+
+    async def test_failed_squeue_probe_stays_fail_closed(self):
+        """An unanswered squeue proves nothing: the slot stays taken."""
+        ssh = FakeSsh()
+        mgr = self._mgr(ssh)
+        res = await mgr.submit(job_name="unknown", working_directory=ROOT, command=["ls"])
+        ssh.states.clear()
+        ssh.sacct_omits = {res["job_id"]}
+        ssh.squeue_fails = True
+        states, queue_ok = await mgr._queue_states()
+        active = await mgr._tracker.count_active(states, queue_ok=queue_ok)
+        assert queue_ok is False
+        assert active == 1
+
+    async def test_unanswered_squeue_denies_submit_instead_of_guessing(self):
+        """With the queue unreadable, the limit is enforced conservatively."""
+        ssh = FakeSsh()
+        mgr = self._mgr(ssh)
+        r1 = await mgr.submit(job_name="a", working_directory=ROOT, command=["ls"])
+        r2 = await mgr.submit(job_name="b", working_directory=ROOT, command=["ls"])
+        ssh.states.clear()
+        ssh.sacct_omits = {r1["job_id"], r2["job_id"]}
+        ssh.squeue_fails = True
+        with pytest.raises(SlurmPolicyError, match="Too many active jobs"):
+            await mgr.submit(job_name="c", working_directory=ROOT, command=["ls"])
 
     async def test_full_quota_denies_new_submit_with_guidance(self):
         """20/20 with no queue must not happen: finished jobs free the quota."""

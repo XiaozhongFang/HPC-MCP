@@ -14,7 +14,7 @@ import re
 import shlex
 
 from ..config import Config
-from ..errors import RemoteCommandError, SlurmPolicyError
+from ..errors import HpcMcpError, RemoteCommandError, SlurmPolicyError
 from ..security import slurm_policy
 from ..security.path_policy import is_within, validate_path
 from ..ssh.manager import SshManager
@@ -181,8 +181,8 @@ class SlurmManager:
         gpus = gpus if gpus is not None else int(script_defaults.get("gpus") or 0)
 
         # concurrency check against currently active tracked jobs
-        states = await self._queue_states()
-        active = await self._tracker.count_active(states)
+        states, queue_ok = await self._queue_states()
+        active = await self._tracker.count_active(states, queue_ok=queue_ok)
         eff = slurm_policy.validate_job_request(
             self._cfg.slurm,
             partition=partition,
@@ -234,11 +234,36 @@ class SlurmManager:
             await self._tracker.register(
                 job_id, job_name=safe_name, project_root=real_cwd, job_dir=job_dir
             )
-        except Exception:
+        except Exception as exc:
             # A submitted job without an ownership record would either leak
-            # resources or become unmanageable under a shared account.
-            await self._ssh.run(["scancel", "--", job_id], check=False)
-            raise
+            # resources or become unmanageable under a shared account, so the
+            # job is rolled back.  The rollback is stated in the error itself:
+            # a bare "submit failed" would leave the agent looking for a job
+            # that is already cancelled.
+            rolled_back = False
+            try:
+                cancel = await self._ssh.run(["scancel", "--", job_id], check=False)
+                rolled_back = cancel.exit_code == 0
+            except Exception:  # noqa: BLE001 - never mask the original failure
+                pass
+            if rolled_back:
+                note = (
+                    f"\n\nJob {job_id} reached Slurm but could not be registered as "
+                    "owned by this MCP session, so it was cancelled automatically."
+                )
+            else:
+                note = (
+                    f"\n\nJob {job_id} reached Slurm but could not be registered as "
+                    "owned by this MCP session, and the automatic rollback (scancel) "
+                    "did not succeed either: the job may still be queued and is not "
+                    "manageable through this MCP instance."
+                )
+            message = getattr(exc, "user_message", None) or str(exc)
+            if isinstance(exc, HpcMcpError):
+                # Same error type and exit code, plus what happened to the job.
+                exc.user_message = message + note
+                raise
+            raise RemoteCommandError(message + note) from exc
         return {
             "job_id": job_id,
             "job_name": safe_name,
@@ -388,15 +413,19 @@ class SlurmManager:
     async def _tracked_ids(self) -> list[str]:
         return await self._tracker.list_owned_job_ids()
 
-    async def _query_squeue(self, job_ids: list[str], fmt: str) -> list[str]:
+    async def _query_squeue(self, job_ids: list[str], fmt: str) -> tuple[list[str], bool]:
         """Run ``squeue`` for exactly the given tracked job IDs.
 
         Never queries the whole shared-account queue: other users' jobs must
-        not even reach this process.  Returns the raw output lines.
+        not even reach this process.  Returns the raw output lines plus
+        whether every invocation succeeded: a failed query also produces no
+        lines, and callers that treat "not listed" as "no longer queued"
+        must be able to tell the two apart.
         """
         if not job_ids:
-            return []
+            return [], True
         lines: list[str] = []
+        ok = True
         for start in range(0, len(job_ids), self._SQUEUE_BATCH):
             chunk = job_ids[start : start + self._SQUEUE_BATCH]
             res = await self._ssh.run(
@@ -404,20 +433,28 @@ class SlurmManager:
             )
             if res.exit_code == 0:
                 lines.extend(res.stdout_text.splitlines())
-        return lines
+            else:
+                ok = False
+        return lines, ok
 
-    async def _queue_states(self) -> dict[str, str]:
-        """States of *tracked* active jobs only (never the whole account)."""
+    async def _queue_states(self) -> tuple[dict[str, str], bool]:
+        """States of *tracked* active jobs only (never the whole account).
+
+        Returns ``(states, query_ok)``; ``query_ok`` is False when squeue
+        could not be asked at all, so an empty ``states`` map means either
+        "nothing is queued" or "the query failed".
+        """
         states: dict[str, str] = {}
-        for line in await self._query_squeue(await self._tracked_ids(), "%i %T"):
+        lines, ok = await self._query_squeue(await self._tracked_ids(), "%i %T")
+        for line in lines:
             parts = line.split()
             if len(parts) == 2 and parts[0].isdigit():
                 states[parts[0]] = parts[1]
-        return states
+        return states, ok
 
     async def status(self, job_id: str) -> dict:
         entry = await self._tracker.require_owned(job_id)
-        states = await self._queue_states()
+        states, _queue_ok = await self._queue_states()
         if job_id in states:
             return {"job_id": job_id, "state": states[job_id], "source": "squeue"}
         # fall back to accounting for finished jobs
@@ -441,7 +478,8 @@ class SlurmManager:
     async def queue(self) -> list[dict]:
         mine = {e["job_id"]: e for e in await self._tracker.list_mine()}
         jobs: list[dict] = []
-        for line in await self._query_squeue(list(mine), "%i|%j|%T|%M|%l|%D|%R"):
+        lines, _queue_ok = await self._query_squeue(list(mine), "%i|%j|%T|%M|%l|%D|%R")
+        for line in lines:
             parts = line.split("|", 6)
             if len(parts) == 7 and parts[0] in mine:
                 jobs.append(
