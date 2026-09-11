@@ -371,6 +371,12 @@ The login-node allow-list **deliberately** excludes `lscpu`/`numactl`, and `/pro
 
 Principle: **prefer one high-level call over several low-level ones**; `hpc.files.read` is a bounded slice — do not read from `offset=0` to EOF; repeated read-only queries are deduplicated by the server-side TTL cache.
 
+Housekeeping rules the server states explicitly (so no turn is wasted on permission errors):
+
+- **Scratch files have one home**: test scripts, test logs, job wrappers and intermediate artifacts go into `session_tmp_dir` from `hpc.info` (`$ROOT/.hpc-mcp/tmp/<session>/`), and the whole directory is removed with `hpc.files.delete(recursive=true)` when the task is done.
+- **`.sh` job scripts are submitted, never executed**: pass the script path as `command` to `hpc.slurm.submit` — the server runs it with `bash` and reads its `#SBATCH` directives, so no executable bit is needed and `chmod` is never required (it is denied on login nodes anyway).
+- **Job logs are captured by the server** under `$ROOT/.hpc-mcp/jobs/<job-id>/`; read them with `hpc.slurm.output` / `hpc.jobs.diagnose` instead of redirecting output inside the job script.
+
 See [`skills/hpc-development/SKILL.md`](skills/hpc-development/SKILL.md) for details.
 
 ## Security tests
@@ -392,7 +398,7 @@ Arbitrary remote shell, arbitrary SSH hosts, sudo, port forwarding, multi-host s
 - **"No HPC host/root configured" on startup**: provide at least host and root through one of the three configuration sources.
 - **Every tool DENIED with "No Slurm partitions are allowed"**: configure `slurm.allowed_partitions` (empty by default, fail-closed).
 - **SSH 255 errors**: verify with `hpc-mcp ... --check` first; then confirm `~/.ssh/config` and passwordless BatchMode work.
-- **Logs**: written to stderr (stdout carries the MCP protocol only); `--log-file` appends to a file.
+- **Logs and audit trail**: always written to stderr (stdout carries the MCP protocol only), and appended by default to `~/.local/share/hpc-mcp/hpc-mcp.log` — every tool call is recorded with its ALLOW/DENY decision. Override the path with `--log-file` / `HPC_MCP_LOG_FILE` / `log_file` in the config, or set `none` to keep the audit trail on stderr only.
 
 ## Documentation
 

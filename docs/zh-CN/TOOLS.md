@@ -32,9 +32,13 @@
 
 连接与集群能力概览。**无参数**。
 
-返回：`slurm_available`、`cluster`、`working_root`、`workspace_available`、`transfer_enabled`、
+返回：`slurm_available`、`cluster`、`working_root`、`tmp_dir`、`session_tmp_dir`、`workspace_available`、`transfer_enabled`、
 `allowed_partitions`（可提交的分区白名单）、`max_cpus`/`max_nodes`/`max_memory_mb`/`max_gpus`/`max_time`。
 
+> **临时文件只有一个去处**：测试脚本、测试日志、作业包装脚本、中间产物一律放 `session_tmp_dir`
+> （`$HPC_MCP_ROOT/.hpc-mcp/tmp/<会话>/`），不要散落在项目目录；任务结束后用
+> `hpc.files.delete(recursive=true)` 整个目录删除。交付物应归档到项目目录，不要留在临时目录里。
+>
 > 出于安全考虑**不返回** SSH host/user/port 和本地路径根（避免 Agent 绕过 MCP 直连）。
 > 申请资源前先看这里的上限。
 
@@ -139,6 +143,10 @@ SFTP 传输，**两端都受沙箱限制**（本地 ∈ `local_roots`，远程 �
 | | `local_path` | string | ✅ | 本地目标路径（`local_roots` 内） |
 
 > 两条路径都拒绝符号链接；本地侧额外拒绝 `.ssh`/`.gnupg` 与私钥文件名；传输后校验大小上限。
+>
+> 上传的 **`.sh` 作业脚本不需要可执行位**：直接用 `hpc.slurm.submit` 把脚本路径作为 `command` 提交
+> （服务端用 `bash` 执行并读取其 `#SBATCH` 指令）。不要 `chmod`，也不要在登录节点上尝试直接执行——
+> 上传结果里也会带同样的 `submit_hint` 提示。
 
 ---
 
@@ -173,7 +181,7 @@ SFTP 传输，**两端都受沙箱限制**（本地 ∈ `local_roots`，远程 �
 
 | 参数 | 类型 | 必填 | 默认 | 说明 |
 |---|---|---|---|---|
-| `command` | array 或 string | ✅ | — | 程序 argv（如 `["julia","--project=.","test/runtests.jl"]`），或**单个 `.sh` 脚本路径**（此时读取其 `#SBATCH` 指令作为默认值） |
+| `command` | array 或 string | ✅ | — | 程序 argv（如 `["julia","--project=.","test/runtests.jl"]`），或**单个 `.sh` 脚本路径**——用 `bash` 执行，**不需要可执行位**；此时读取其 `#SBATCH` 指令作为默认值 |
 | `job_name` | string | — | `"job"` | 作业名（会被规范化为 `[A-Za-z0-9_.-]`，≤ 64 字符） |
 | `working_directory` | string | — | `$HPC_MCP_ROOT` | 作业工作目录（root 内，realpath 校验） |
 | `partition` | string | — | 配置的第一个白名单分区 | 必须命中 `slurm.allowed_partitions` |
@@ -188,6 +196,9 @@ SFTP 传输，**两端都受沙箱限制**（本地 ∈ `local_roots`，远程 �
 行为要点：脚本由服务端生成（`#SBATCH` 由服务端推导），stdout/stderr 固定捕获到
 `$HPC_MCP_ROOT/.hpc-mcp/jobs/<job-id>/`；提交后立刻用 `squeue -j`/`sacct -j` 交叉确认作业归属，
 未确认的作业不会被登记；并发活跃作业数受 `slurm.max_concurrent_jobs` 限制。
+
+单个 `.sh` 参数会以 **`bash <脚本>`** 执行，而不是把脚本当可执行文件直接调用——上传的脚本没有可执行位也能跑
+（登录节点也禁用 `chmod`），因此不需要在文件权限上试错。一次性的作业脚本请放在 `session_tmp_dir`（见 `hpc.info`）。
 
 ### `hpc.job.run` — `openWorld`
 

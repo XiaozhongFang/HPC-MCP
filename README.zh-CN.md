@@ -392,6 +392,12 @@ hpc.slurm.submit
 
 原则：**能一次高阶调用完成的，不要拆成多次低级调用**；`hpc.files.read` 是 bounded slice，不要从 offset=0 读到 EOF；重复的只读查询由服务端 TTL 缓存去重。
 
+服务端会明确告知的几条整理规则（避免把轮次浪费在权限报错上）：
+
+- **临时文件只有一个去处**：测试脚本、测试日志、作业包装脚本、中间产物放 `hpc.info` 返回的 `session_tmp_dir`（`$ROOT/.hpc-mcp/tmp/<会话>/`），任务结束用 `hpc.files.delete(recursive=true)` 整目录删除。
+- **`.sh` 脚本只提交、不执行**：把脚本路径作为 `command` 传给 `hpc.slurm.submit`——服务端用 `bash` 执行并读取其 `#SBATCH` 指令，因此脚本不需要可执行位，也不需要 `chmod`（登录节点本来就禁用它）。
+- **作业日志由服务端捕获**在 `$ROOT/.hpc-mcp/jobs/<job-id>/`，用 `hpc.slurm.output` / `hpc.jobs.diagnose` 读取，不要在作业脚本里自己重定向输出。
+
 详见 [`skills/hpc-development/SKILL.md`](skills/hpc-development/SKILL.md)。
 
 ## 安全测试
@@ -413,7 +419,7 @@ python -m pytest tests/ -q
 - **启动报 "No HPC host/root configured"**：三种配置方式至少提供 host 与 root。
 - **工具全部 DENY "No Slurm partitions are allowed"**：配置 `slurm.allowed_partitions`（默认空，fail-closed）。
 - **SSH 255 错误**：先用 `hpc-mcp ... --check` 验证；确认 `~/.ssh/config` 与 BatchMode 免密可用。
-- **日志**：写 stderr（stdout 只走 MCP 协议）；`--log-file` 可追加到文件。
+- **日志与审计轨迹**：始终写 stderr（stdout 只走 MCP 协议），并默认追加到 `~/.local/share/hpc-mcp/hpc-mcp.log`，每次工具调用都会记录 ALLOW/DENY 决策。可用 `--log-file` / `HPC_MCP_LOG_FILE` / 配置文件的 `log_file` 改路径，设为 `none` 则只写 stderr。
 
 ## 文档
 

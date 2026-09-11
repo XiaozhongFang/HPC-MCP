@@ -30,6 +30,11 @@ class SlurmManager:
         self._tracker = tracker
         self._submit_lock = asyncio.Lock()
 
+    @property
+    def session_id(self) -> str:
+        """Ownership namespace of this server instance (also the scratch subdir)."""
+        return self._tracker.session_id
+
     # -- high-level run -------------------------------------------------------
 
     #: Trusted runtime profiles for hpc.job.run.  Each profile maps a
@@ -155,6 +160,7 @@ class SlurmManager:
     ) -> dict:
         cmd_argv = self._validate_command(command)
         env_values = self._validate_environment(environment)
+        run_argv = self._execution_argv(cmd_argv)
         if not isinstance(job_name, str) or not job_name or len(job_name) > 256 or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in job_name):
             raise SlurmPolicyError("job_name must be 1-256 characters without control characters")
         # working_directory must be inside the sandbox (realpath-verified)
@@ -200,7 +206,7 @@ class SlurmManager:
         script = self._render_script(
             job_name=safe_name,
             cwd=real_cwd,
-            cmd_argv=cmd_argv,
+            cmd_argv=run_argv,
             eff=eff,
             environment=env_values,
         )
@@ -318,6 +324,25 @@ class SlurmManager:
         "--gres=gpu": "gpus",
     }
 
+    @staticmethod
+    def _is_script_path(cmd_argv: list[str]) -> bool:
+        """Whether the command is a single ``.sh`` job script.
+
+        Such a script carries its own ``#SBATCH`` directives and is run
+        through ``bash`` by :meth:`_execution_argv`, so it never needs the
+        executable bit: sbatch only requires read permission.  (``chmod`` is
+        not available to the agent, so demanding +x would only produce a
+        permission-error loop.)
+        """
+        return len(cmd_argv) == 1 and cmd_argv[0].endswith(".sh")
+
+    @classmethod
+    def _execution_argv(cls, cmd_argv: list[str]) -> list[str]:
+        """The argv actually executed inside the generated batch script."""
+        if cls._is_script_path(cmd_argv):
+            return ["bash", *cmd_argv]
+        return list(cmd_argv)
+
     async def _read_sbatch_defaults(self, working_directory: str, cmd_argv: list[str]) -> dict:
         """Parse #SBATCH directives from a user .sh script to serve as defaults.
 
@@ -325,7 +350,7 @@ class SlurmManager:
         the user root.  Values from the agent's explicit arguments win over
         these; the partition hint still has to pass the allow-list policy.
         """
-        if len(cmd_argv) != 1 or not cmd_argv[0].endswith(".sh"):
+        if not self._is_script_path(cmd_argv):
             return {}
         from ..filesystem.service import FileService
 

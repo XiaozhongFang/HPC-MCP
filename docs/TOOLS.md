@@ -30,9 +30,13 @@ This document describes the purpose, arguments, defaults, constraints, and retur
 
 Connection and cluster capability overview. **No arguments.**
 
-Returns: `slurm_available`, `cluster`, `working_root`, `workspace_available`, `transfer_enabled`,
+Returns: `slurm_available`, `cluster`, `working_root`, `tmp_dir`, `session_tmp_dir`, `workspace_available`, `transfer_enabled`,
 `allowed_partitions` (the partition allow-list), `max_cpus`/`max_nodes`/`max_memory_mb`/`max_gpus`/`max_time`.
 
+> **Scratch files have one home**: put test scripts, test logs, job wrappers and intermediate artifacts in `session_tmp_dir`
+> (`$HPC_MCP_ROOT/.hpc-mcp/tmp/<session>/`) instead of scattering them through the project tree, and remove the whole directory with
+> `hpc.files.delete(recursive=true)` when the task is done. Deliverables belong in the project, not in the scratch directory.
+>
 > For security it does **not** return the SSH host/user/port or the local path roots (so the agent cannot bypass the MCP layer and connect directly).
 > Check the ceilings here before requesting resources.
 
@@ -136,6 +140,10 @@ SFTP transfer, **sandboxed on both ends** (local ∈ `local_roots`, remote ∈ `
 | | `local_path` | string | ✅ | Local target path (inside `local_roots`) |
 
 > Both paths reject symlinks; the local side additionally rejects `.ssh`/`.gnupg` and private-key filenames; sizes are validated after transfer.
+>
+> An uploaded **`.sh` job script needs no executable bit**: submit it with `hpc.slurm.submit` and the script path as `command`
+> (the server runs it with `bash` and reads its `#SBATCH` directives). Do not `chmod` it and do not try to execute it on the login node —
+> the upload result carries the same reminder in `submit_hint`.
 
 ---
 
@@ -170,7 +178,7 @@ Submit a compute job (the **only** compute entry point, subject to the server-si
 
 | Argument | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `command` | array or string | ✅ | — | Program argv (e.g. `["julia","--project=.","test/runtests.jl"]`), or a **single `.sh` script path** (its `#SBATCH` directives then supply the defaults) |
+| `command` | array or string | ✅ | — | Program argv (e.g. `["julia","--project=.","test/runtests.jl"]`), or a **single `.sh` script path** — run with `bash`, so **no executable bit is required**; its `#SBATCH` directives then supply the defaults |
 | `job_name` | string | — | `"job"` | Job name (normalised to `[A-Za-z0-9_.-]`, ≤ 64 characters) |
 | `working_directory` | string | — | `$HPC_MCP_ROOT` | Job working directory (inside root, realpath-verified) |
 | `partition` | string | — | first allow-listed partition in the config | Must hit `slurm.allowed_partitions` |
@@ -183,6 +191,8 @@ Submit a compute job (the **only** compute entry point, subject to the server-si
 | `environment` | object | — | — | Extra environment variables (names must match `[A-Za-z_][A-Za-z0-9_]*`) |
 
 Behaviour: the script is generated server-side (`#SBATCH` directives are derived by the server), stdout/stderr are always captured under `$HPC_MCP_ROOT/.hpc-mcp/jobs/<job-id>/`; right after submission the job's ownership is cross-checked with `squeue -j`/`sacct -j`, and an unconfirmed job is not registered; the number of concurrently active jobs is bounded by `slurm.max_concurrent_jobs`.
+
+A single `.sh` argument is executed as **`bash <script>`**, never as a bare executable path — an uploaded script works without the executable bit (and `chmod` is denied on login nodes), so never make the agent chase file permissions. Keep throwaway job scripts in `session_tmp_dir` (see `hpc.info`).
 
 ### `hpc.job.run` — `openWorld`
 

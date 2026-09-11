@@ -80,6 +80,54 @@ class TestBuildConfig:
         assert cfg.slurm.allowed_partitions == ["compute"]
         assert cfg.slurm.max_cpus == 8
 
+    def test_log_file_defaults_to_a_local_path(self, monkeypatch, tmp_path):
+        """Without any setting the audit log lands in a local default path,
+        instead of living only on stderr where no one reads it."""
+        _base_env(monkeypatch)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        cfg = build_config(NS(host="h", root="/home/u/me"))
+        assert cfg.log_file == str(tmp_path / ".local/share/hpc-mcp/hpc-mcp.log")
+        assert cfg.log_level == "INFO"
+
+    def test_log_file_precedence_cli_env_file(self, monkeypatch, tmp_path):
+        _base_env(monkeypatch)
+        config_file = tmp_path / "c.yaml"
+        config_file.write_text(
+            "host: h\nroot: /home/u/me\nlog_file: /from/config.log\nlog_level: WARNING\n"
+        )
+        monkeypatch.setenv("HPC_MCP_LOG_FILE", "/from/env.log")
+        monkeypatch.setenv("HPC_MCP_LOG_LEVEL", "ERROR")
+        cfg = build_config(NS(config=str(config_file)))
+        assert cfg.log_file == "/from/env.log"
+        assert cfg.log_level == "ERROR"
+
+        cfg = build_config(NS(config=str(config_file), log_file="/from/cli.log", log_level="debug"))
+        assert cfg.log_file == "/from/cli.log"
+        assert cfg.log_level == "DEBUG"
+
+        monkeypatch.delenv("HPC_MCP_LOG_FILE")
+        monkeypatch.delenv("HPC_MCP_LOG_LEVEL")
+        cfg = build_config(NS(config=str(config_file)))
+        assert cfg.log_file == "/from/config.log"
+        assert cfg.log_level == "WARNING"
+
+    def test_explicitly_disabled_log_file_stays_stderr_only(self, monkeypatch, tmp_path):
+        """``log_file: ""`` or ``HPC_MCP_LOG_FILE=none`` are the explicit opt-out."""
+        _base_env(monkeypatch)
+        config_file = tmp_path / "c.yaml"
+        config_file.write_text('host: h\nroot: /home/u/me\nlog_file: ""\n')
+        cfg = build_config(NS(config=str(config_file)))
+        assert cfg.log_file is None
+
+        monkeypatch.setenv("HPC_MCP_LOG_FILE", "none")
+        cfg = build_config(NS(host="h", root="/home/u/me"))
+        assert cfg.log_file is None
+
+        # An empty env var counts as "unset", so the local default applies.
+        monkeypatch.setenv("HPC_MCP_LOG_FILE", "")
+        cfg = build_config(NS(host="h", root="/home/u/me"))
+        assert cfg.log_file is not None
+
     def test_bad_yaml(self, monkeypatch, tmp_path):
         _base_env(monkeypatch)
         p = tmp_path / "c.yaml"

@@ -35,7 +35,7 @@
 | `sftp_bin` | string | PATH 中查找 | sftp 可执行文件，形式同 `ssh_bin`。`HPC_MCP_SFTP_BIN`，`--sftp-bin` |
 | `wait_max_seconds` | int | `3600` | `hpc.slurm.wait` / `wait_and_diagnose` 的最大等待秒数（≤ 7 天）。`HPC_MCP_WAIT_MAX_SECONDS` |
 | `cache_ttl_seconds` | float | `2.0` | 只读查询去重缓存 TTL（秒）；`0` 禁用。`HPC_MCP_CACHE_TTL_SECONDS` |
-| `log_file` | string | 仅 stderr | 追加写日志的文件路径（`~` 会展开）。`HPC_MCP_LOG_FILE`，`--log-file` |
+| `log_file` | string | `~/.local/share/hpc-mcp/hpc-mcp.log` | 追加写日志与 ALLOW/DENY 审计轨迹的文件（`~` 会展开，父目录自动创建）。设为 `none`/`off`/`""` 表示只写 stderr。`HPC_MCP_LOG_FILE`，`--log-file` |
 | `log_level` | string | `INFO` | 日志级别：`DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`。`HPC_MCP_LOG_LEVEL`，`--log-level` |
 
 > `ssh.*` 子段参数也可直接写在顶层（如 `connect_timeout`、`strict_host_key_checking`），
@@ -184,6 +184,8 @@ topology:
 
 wait_max_seconds: 3600
 cache_ttl_seconds: 2.0
+# 追加写日志与 ALLOW/DENY 审计轨迹（未设置时的默认路径）。
+# 设为 `none` 表示只写 stderr。
 log_file: ~/.local/share/hpc-mcp/hpc-mcp.log
 log_level: INFO
 ```

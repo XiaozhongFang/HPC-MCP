@@ -14,6 +14,7 @@ description: 在远程 HPC 集群上安全地进行科研计算开发（Julia/MO
 3. **不要自己构造 SSH/SCP 命令**；用 `hpc.files.*` 工具传输和读写。
 4. `hpc.shell.run_safe` 仅限轻量查询（`ls`、`cat`、`git status/diff/log`、`module list` 等），不支持管道/重定向/命令串联；`squeue`/`sacct`/`scontrol` 必须通过带归属检查的 Slurm 工具查询。`lscpu`/`numactl` 等硬件查询也不在登录节点白名单内——要并行/性能参数请用 `hpc.cluster.topo`（它会在计算节点采集）。
 5. 文件传输只能使用配置的 `local_root` 与远程 `HPC_MCP_ROOT`；不要上传 `.ssh`、私钥或符号链接。
+6. **临时文件统一放会话临时目录**（`hpc.info` 返回的 `session_tmp_dir`，即 `$HPC_MCP_ROOT/.hpc-mcp/tmp/<会话>/`），**任务结束要清理**——不要把测试脚本、测试日志、中间产物散落在项目目录里。
 
 ## 标准工作流（优先远程直接操作）
 
@@ -40,6 +41,7 @@ description: 在远程 HPC 集群上安全地进行科研计算开发（Julia/MO
 
    - `working_directory` 缺省 = 配置的用户根目录；`partition` 可用 `hpc.info` 查到的允许分区名指定（GPU 作业选 GPU 分区），缺省取配置的第一个；`cpus_per_task`/`nodes`/`ntasks`/`gpus`/`time_limit` 都有安全默认值，也可从所提交 `.sh` 脚本的 `#SBATCH` 指令读取。
    - 资源上限（CPU/节点/内存/GPU/时长/并发）由服务端强制，超限会被拒——先看 `hpc.info` 的限额再申请。
+   - **`.sh` 脚本直接提交，不要试错执行权限**：把脚本路径作为 `command` 传给 `hpc.slurm.submit` 即可（服务端用 `bash` 执行，并自动读取脚本里的 `#SBATCH` 指令）；脚本**不需要可执行位**，不要尝试 `chmod`、`./script.sh` 或 `bash script.sh`——登录节点上没有执行权限，那些尝试只会被拒绝。
 6. **跟踪**：`hpc.slurm.status` 轮询，或 `hpc.jobs.wait` 等待（有上限）。**生产级**用 `hpc.jobs.wait_and_diagnose` 一次完成等待+诊断。
 7. **作业失败诊断**：直接用一次 `hpc.jobs.diagnose`（状态 + exit code + 记账 + stdout/stderr 尾部 + 常见错误签名扫描）。**不要**自己串联 `status → output → accounting → read`。
 8. **重复查询会被去重**：同一只读查询在 2 秒内重复调用直接命中缓存，不产生 SSH；但不要依赖它——**没有新证据就不要重复调用**。
@@ -85,6 +87,30 @@ description: 在远程 HPC 集群上安全地进行科研计算开发（Julia/MO
 - 只把 `recommended_parallel_parameters` 当**起点**：它是按物理核/NUMA 域推导的启发式，
   真正的调优仍要跑基准并对比（`hpc.job.run` 提交不同 rank/线程组合，用
   `hpc.jobs.wait_and_diagnose` 收结果）。
+
+### 临时文件、作业日志与清理
+
+**所有临时产物只放一个地方**：`hpc.info` 返回的 `session_tmp_dir`（即 `$HPC_MCP_ROOT/.hpc-mcp/tmp/<会话>/`）。
+
+- 属于这一类的：一次性测试脚本（`test_*.sh`）、作业包装脚本、抓取的中间输出、临时数据文件、实验性 `.log`。
+- **不要**放进这一类的：项目源码、正式维护的 `scripts/*.jl`、要长期保留的输入文件——它们属于项目目录。
+- 目录不存在就自己建：`hpc.files.mkdir(path=<session_tmp_dir>, parents=true)`，之后用该目录下的绝对路径写文件。
+
+**任务结束就清理，一次删干净**：
+
+```json
+{ "tool": "hpc.files.delete", "arguments": { "path": "<session_tmp_dir>", "recursive": true } }
+```
+
+- 删之前先确认产出已经归档到项目目录（或已下载到本地）——交付物**不要**留在临时目录里。
+- 不要逐个文件删，也不要"留到下次"：共享账号下散落的临时文件会干扰同伴。
+- 同时检查共享账号的顾虑：临时目录里不要放别人的数据或敏感内容。
+
+**作业日志由服务端管理，不要自己重定向**：
+
+- 每个作业的 stdout/stderr 自动捕获在 `$HPC_MCP_ROOT/.hpc-mcp/jobs/<job_id>/stdout.log` 与 `stderr.log`，用 `hpc.slurm.output` / `hpc.jobs.diagnose` 读取（有尾部上限）。
+- 所以**不要**在脚本里写 `> out.log 2>&1` 之类重定向，也不要再问"日志在哪"——直接提交，用诊断工具读。
+- 服务端审计日志（每次工具调用的 ALLOW/DENY、参数、结果）默认写在**运行 MCP 的那台机器**上：`~/.local/share/hpc-mcp/hpc-mcp.log`；可用 `HPC_MCP_LOG_FILE`（或配置文件 `log_file`）改路径，设为 `none` 则只写 stderr。它记录的是 agent 的操作轨迹，不是作业输出。
 
 ### 写保护
 

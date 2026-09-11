@@ -107,6 +107,9 @@ def main(argv: list[str] | None = None) -> int:
         except ConfigError as exc:
             print(f"Configuration error:\n{exc}", file=sys.stderr)
             return 2
+        # Attach the configured log file as well: the earlier call only set up
+        # stderr, and the path is known for sure now.
+        setup_logging(cfg.log_level, cfg.log_file)
         return cmd_mcp_add(cfg)
 
     try:

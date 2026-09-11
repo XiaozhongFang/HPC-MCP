@@ -191,7 +191,7 @@ hpc-mcp \
 | `--sftp-bin` | sftp executable path (same forms as `--ssh-bin`) | `HPC_MCP_SFTP_BIN` | optional |
 | `--config` | YAML config file path | — | optional |
 | `--check` | verify connectivity only, then exit | — | optional |
-| `--log-file` | append logs to this file (stderr is still written) | `HPC_MCP_LOG_FILE` | optional |
+| `--log-file` | append logs + audit records to this file (stderr is still written); defaults to `~/.local/share/hpc-mcp/hpc-mcp.log`, `none` = stderr only | `HPC_MCP_LOG_FILE` | optional |
 | `--log-level` | log level: `DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL` (default `INFO`) | `HPC_MCP_LOG_LEVEL` | optional |
 | `--version` | print the version and exit | — | optional |
 
@@ -326,5 +326,7 @@ After registering, the client starts `hpc-mcp` over stdio, and you can ask it to
 ## 8. Reading the logs
 
 - All logs go to **stderr** (stdout is reserved for the MCP protocol).
-- To persist them: `--log-file ~/.local/share/hpc-mcp/hpc-mcp.log`.
+- They are **appended to `~/.local/share/hpc-mcp/hpc-mcp.log` by default** — every tool call is recorded with its ALLOW/DENY decision, so there is a reviewable trail even when the MCP client swallows stderr.
+- To change the path: `--log-file /path/to/hpc-mcp.log` (or `HPC_MCP_LOG_FILE`, or `log_file` in the config). Set it to `none` to keep logs on stderr only.
 - To see the allow/deny decision of every call: `--log-level DEBUG`.
+- That file records the **agent's tool calls**, not job output: job stdout/stderr is captured under `$ROOT/.hpc-mcp/jobs/<job-id>/`.

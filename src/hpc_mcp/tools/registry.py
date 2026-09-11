@@ -97,6 +97,11 @@ def build_tools(
     root = cfg.root
     search_svc = search or FileSearchService(cfg, ssh)
     projects_svc = projects or ProjectService(cfg, ssh, files, safe_exec, slurm._tracker)
+    #: Scratch space for temporary agent files (test scripts, test logs,
+    #: intermediate artifacts).  One directory per MCP instance/session so a
+    #: finished task can be cleaned up with a single recursive delete.
+    tmp_dir = cfg.tmp_dir
+    session_tmp_dir = cfg.session_tmp_dir(slurm.session_id)
 
     def _str(_name: str, desc: str) -> dict:
         return {"type": "string", "description": desc}
@@ -132,6 +137,23 @@ def build_tools(
             raise PolicyDenied(f"{name} must be a boolean")
         return value
 
+    def _with_script_hint(payload: Any, path: str | None) -> Any:
+        """Point the agent at hpc.slurm.submit for a freshly written .sh file.
+
+        An uploaded job script has no executable bit and the login node denies
+        ``chmod``, so "run it directly" can only loop on permission errors;
+        sbatch only needs read permission, which the file already has.
+        """
+        if isinstance(payload, dict) and isinstance(path, str) and path.endswith(".sh"):
+            payload["submit_hint"] = (
+                "Shell script detected. Submit it with hpc.slurm.submit and this "
+                "path as 'command' -- the server runs it with bash and reads its "
+                "#SBATCH directives. It does NOT need an executable bit: do not "
+                "chmod it, and do not try to run it directly (the login node "
+                "forbids that)."
+            )
+        return payload
+
     abs_path = f"Absolute remote path inside {root}"
 
     tools: list[ToolDef] = []
@@ -146,6 +168,8 @@ def build_tools(
         info.update(
             {
                 "working_root": root,
+                "tmp_dir": tmp_dir,
+                "session_tmp_dir": session_tmp_dir,
                 "workspace_available": any(isinstance(r, str) and r for r in cfg.local_roots),
                 "transfer_enabled": bool(cfg.local_roots),
                 "allowed_partitions": cfg.slurm.allowed_partitions,
@@ -161,11 +185,18 @@ def build_tools(
         ToolDef(
             name="hpc.info",
             description=(
-                "Get HPC connection info: sandboxed working root, local transfer "
-                "availability (workspace_available/transfer_enabled), Slurm "
+                "Get HPC connection info: sandboxed working root, the scratch "
+                "directories for temporary files (tmp_dir, session_tmp_dir), local "
+                "transfer availability (workspace_available/transfer_enabled), Slurm "
                 "availability, cluster name, allowed partitions (use one in "
-                "hpc.slurm.submit) and Slurm resource limits. Connection details "
-                "(host/user) and local path roots are intentionally not exposed."
+                "hpc.slurm.submit) and Slurm resource limits.\n"
+                "Scratch files (test scripts, test logs, job wrappers, intermediate "
+                "artifacts) belong in session_tmp_dir -- create it with "
+                "hpc.files.mkdir (parents=true) instead of scattering throwaway "
+                "files through the project tree, and remove the whole directory with "
+                "hpc.files.delete(recursive=true) once the task is done.\n"
+                "Connection details (host/user) and local path roots are "
+                "intentionally not exposed."
             ),
             schema={"type": "object", "properties": {}, "additionalProperties": False},
             handler=hpc_info,
@@ -297,7 +328,7 @@ def build_tools(
     )
 
     async def files_write(args: dict) -> Any:
-        return await files.write_file(
+        result = await files.write_file(
             _str_arg(args, "path"),
             _str_arg(args, "content"),
             append=_bool_arg(args, "append"),
@@ -305,6 +336,7 @@ def build_tools(
             expected_mtime=_int_arg(args, "expected_mtime", minimum=0),
             expected_sha256=args.get("expected_sha256"),
         )
+        return _with_script_hint(result, result.get("path") if isinstance(result, dict) else None)
 
     tools.append(
         ToolDef(
@@ -316,7 +348,11 @@ def build_tools(
                 "existed_before, previous_size and new_size.\n"
                 "Optimistic concurrency: pass expected_size / expected_mtime / "
                 "expected_sha256 (from a previous hpc.files.read / stat) to refuse "
-                "overwriting a file that another process changed since you read it."
+                "overwriting a file that another process changed since you read it.\n"
+                "Keep throwaway files (test scripts, test logs) in the scratch "
+                "directory reported by hpc.info (session_tmp_dir). A written .sh job "
+                "script is submitted with hpc.slurm.submit -- no executable bit "
+                "needed, and chmod is not available on the login node."
             ),
             schema={
                 "type": "object",
@@ -379,12 +415,18 @@ def build_tools(
     )
 
     async def files_upload(args: dict) -> Any:
-        return await transfer.upload(_str_arg(args, "local_path"), _str_arg(args, "remote_path"))
+        result = await transfer.upload(_str_arg(args, "local_path"), _str_arg(args, "remote_path"))
+        return _with_script_hint(result, result.get("remote_path") if isinstance(result, dict) else None)
 
     tools.append(
         ToolDef(
             name="hpc.files.upload",
-            description=f"Upload a local file to the HPC, destination inside {root}. Uses SFTP.",
+            description=(
+                f"Upload a local file to the HPC, destination inside {root}. Uses SFTP. "
+                "An uploaded .sh job script needs no executable bit: submit it with "
+                "hpc.slurm.submit (the server runs it with bash and reads its #SBATCH "
+                "directives) instead of trying to chmod or execute it."
+            ),
             schema={
                 "type": "object",
                 "properties": {
@@ -544,6 +586,12 @@ def build_tools(
                 "submit the job here and poll hpc.slurm.status/hpc.slurm.output; "
                 "do NOT download source to the local machine and run it locally "
                 "unless the environment truly cannot be reached otherwise.\n"
+                "Job scripts: pass a single .sh path as 'command' and the server "
+                "runs it with bash inside the batch script -- sbatch only needs to "
+                "READ the file, so no executable bit is required. Never chmod a "
+                "script and never try to run it on the login node; submit it here "
+                "instead. Store throwaway scripts in the scratch directory "
+                "reported by hpc.info (session_tmp_dir).\n"
                 "Parameter defaults come from the server configuration or, "
                 "when 'command' is a single .sh script path, from that script's "
                 "#SBATCH directives (e.g. --cpus-per-task, --time, --mem, "
@@ -570,7 +618,7 @@ def build_tools(
                             {"type": "array", "items": {"type": "string"}},
                             {"type": "string"},
                         ],
-                        "description": "Program argv, e.g. ['julia','--project=.','test/runtests.jl'], or a single path to a .sh job script whose #SBATCH directives provide defaults",
+                        "description": "Program argv, e.g. ['julia','--project=.','test/runtests.jl'], or a single path to a .sh job script (executed with bash, so no executable bit is needed; its #SBATCH directives provide the parameter defaults)",
                     },
                     "partition": _str(
                         "partition",
@@ -690,8 +738,7 @@ def build_tools(
     )
 
     async def jobs_wait(args: dict) -> Any:
-        return await slurm.wait(
-            _str_arg(args, "job_id"),
+        return await slurm.wait(            _str_arg(args, "job_id"),
             timeout_seconds=_int_arg(args, "timeout_seconds", minimum=0),
             poll_interval=_int_arg(args, "poll_interval", 10, minimum=1) or 10,
         )

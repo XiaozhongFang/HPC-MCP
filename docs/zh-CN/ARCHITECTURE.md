@@ -3,7 +3,8 @@
 其他语言：[English](../ARCHITECTURE.md) | [日本語](../ja/ARCHITECTURE.md) | [한국어](../ko/ARCHITECTURE.md) | [繁體中文](../zh-TW/ARCHITECTURE.md)
 
 HPC-MCP 是一个 stdio MCP server。MCP 协议是唯一写入 stdout 的数据；
-诊断与审计记录走 stderr 或配置的日志文件。
+诊断与审计记录同时写 stderr **和**配置的日志文件（默认
+`~/.local/share/hpc-mcp/hpc-mcp.log`），因此每次 ALLOW/DENY 决策在会话结束后仍可复查。
 
 ```text
 MCP client
@@ -77,6 +78,13 @@ canonical 作业目录推导，绝不来自不可信元数据。Slurm 会先写�
   并被复用（最终可能被取消），而不是被重复提交。
 - **查询缓存。** 幂等的只读工具按 `tool + 规范化参数` 在
   `cache_ttl_seconds`（默认 2 s，0 禁用）内去重；任何写操作会使整个缓存失效。
+- **临时空间。** agent 的一次性文件（测试脚本、测试日志、作业包装脚本、中间产物）
+  统一放在 `$ROOT/.hpc-mcp/tmp/<会话>/`（每个 MCP 实例一个目录），由 `hpc.info`
+  以 `session_tmp_dir` 返回，任务结束后 agent 用一次递归 `hpc.files.delete` 删除
+  ——临时文件不会堆积在项目目录里。
+- **作业脚本。** 传给 `hpc.slurm.submit` 的单个 `.sh` 路径会渲染为 `bash <脚本>`；
+  sbatch 只读取该文件，因此上传的脚本不需要可执行位，`chmod`（登录节点禁用）
+  也不再出现在工作流里。
 
 ## 已知残余风险（三层）
 

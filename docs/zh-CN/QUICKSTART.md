@@ -198,7 +198,7 @@ hpc-mcp \
 | `--sftp-bin` | sftp 可执行文件路径（形式同 `--ssh-bin`） | `HPC_MCP_SFTP_BIN` | 可选 |
 | `--config` | YAML 配置文件路径 | — | 可选 |
 | `--check` | 只验证连通性然后退出 | — | 可选 |
-| `--log-file` | 日志追加写入的文件（同时仍写 stderr） | `HPC_MCP_LOG_FILE` | 可选 |
+| `--log-file` | 日志与审计记录追加写入的文件（同时仍写 stderr）；默认 `~/.local/share/hpc-mcp/hpc-mcp.log`，`none` = 只写 stderr | `HPC_MCP_LOG_FILE` | 可选 |
 | `--log-level` | 日志级别：`DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`（默认 `INFO`） | `HPC_MCP_LOG_LEVEL` | 可选 |
 | `--version` | 打印版本并退出 | — | 可选 |
 
@@ -332,5 +332,7 @@ reasonix mcp add hpc \
 ## 8. 看日志
 
 - 所有日志走 **stderr**（stdout 只留给 MCP 协议）。
-- 想落盘：`--log-file ~/.local/share/hpc-mcp/hpc-mcp.log`。
+- 默认会**追加写入 `~/.local/share/hpc-mcp/hpc-mcp.log`**——每次工具调用都记录 ALLOW/DENY 决策，即使 MCP 客户端吞掉了 stderr，也留有可复查的轨迹。
+- 想改路径：`--log-file /path/to/hpc-mcp.log`（或 `HPC_MCP_LOG_FILE`、配置文件的 `log_file`）；设为 `none` 则只写 stderr。
 - 想看每次调用的允许/拒绝：`--log-level DEBUG`。
+- 这个文件记录的是 **agent 的工具调用**，不是作业输出：作业 stdout/stderr 捕获在 `$ROOT/.hpc-mcp/jobs/<job-id>/`。

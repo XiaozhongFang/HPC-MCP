@@ -12,9 +12,11 @@ Rules:
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 _LOGGER_NAME = "hpc_mcp"
@@ -29,29 +31,47 @@ _configured = False
 
 
 def setup_logging(level: str = "INFO", log_file: str | None = None) -> None:
-    """Configure the package logger exactly once."""
-    global _configured
-    if _configured:
-        return
-    _configured = True
+    """Configure the package logger.
 
+    Safe to call more than once: the stderr handler is installed on the first
+    call only, while ``log_file`` attaches an additional file handler the
+    first time that path is requested.  A later call that supplies the path
+    configured by the user therefore still takes effect instead of being
+    silently dropped.
+    """
+    global _configured
     logger = logging.getLogger(_LOGGER_NAME)
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
     logger.propagate = False
 
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-    stream = logging.StreamHandler(stream=sys.stderr)
-    stream.setFormatter(fmt)
-    logger.addHandler(stream)
+    if not _configured:
+        _configured = True
+        stream = logging.StreamHandler(stream=sys.stderr)
+        stream.setFormatter(fmt)
+        logger.addHandler(stream)
 
-    if log_file:
+    if log_file and not _has_file_handler(logger, log_file):
         try:
-            fh = logging.FileHandler(log_file, encoding="utf-8")
+            path = Path(log_file).expanduser()
+            # The default path lives under ~/.local/share; create it so the
+            # very first run does not lose its audit trail to a missing dir.
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fh = logging.FileHandler(path, encoding="utf-8")
             fh.setFormatter(fmt)
             logger.addHandler(fh)
         except OSError as exc:  # fail soft: log file is optional
             logger.warning("Could not open log file %s: %s", log_file, exc)
+
+
+def _has_file_handler(logger: logging.Logger, log_file: str) -> bool:
+    """Whether a FileHandler for exactly this path is already attached."""
+    target = os.path.abspath(os.path.expanduser(log_file))
+    return any(
+        isinstance(handler, logging.FileHandler) and handler.baseFilename == target
+        for handler in logger.handlers
+    )
 
 
 def get_logger() -> logging.Logger:
@@ -103,6 +123,7 @@ class AuditLogger:
         job_id: str | None = None,
         duration: float | None = None,
         exit_code: int | None = None,
+        note: str | None = None,
     ) -> None:
         fields = [f"tool={tool}", f"decision={decision}"]
         if args:
@@ -115,6 +136,8 @@ class AuditLogger:
             fields.append(f"duration={duration:.2f}s")
         if exit_code is not None:
             fields.append(f"exit_code={exit_code}")
+        if note:
+            fields.append("note=" + sanitize(note))
         self._log.info("AUDIT " + " ".join(fields))
 
 

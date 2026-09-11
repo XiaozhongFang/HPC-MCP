@@ -67,5 +67,6 @@ topology:
 cache_ttl_seconds: 2.0
 
 # wait_max_seconds: 3600
+# 日志与审计轨迹：未设置时默认写到本地路径；设为 none 只写 stderr
 # log_file: ~/.local/share/hpc-mcp/hpc-mcp.log
 # log_level: INFO

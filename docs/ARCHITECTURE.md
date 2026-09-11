@@ -3,7 +3,9 @@
 Other languages: [简体中文](zh-CN/ARCHITECTURE.md) | [日本語](ja/ARCHITECTURE.md) | [한국어](ko/ARCHITECTURE.md) | [繁體中文](zh-TW/ARCHITECTURE.md)
 
 HPC-MCP is a stdio MCP server. The MCP protocol is the only data written to
-stdout; diagnostics and audit records go to stderr or the configured log file.
+stdout; diagnostics and audit records go to stderr **and** to the configured
+log file (default `~/.local/share/hpc-mcp/hpc-mcp.log`), so every ALLOW/DENY
+decision stays reviewable after the session.
 
 ```text
 MCP client
@@ -89,6 +91,15 @@ data into the MCP process at all*:
 - **Query cache.** Idempotent read-only tools dedupe on `tool + normalized
   args` for `cache_ttl_seconds` (default 2 s, 0 disables); any mutating tool
   invalidates the whole cache.
+- **Scratch space.** Throwaway agent files (test scripts, test logs, job
+  wrappers, intermediate artifacts) live under `$ROOT/.hpc-mcp/tmp/<session>/`,
+  one directory per MCP instance, advertised by `hpc.info` as `session_tmp_dir`
+  and removed by the agent with a single recursive `hpc.files.delete` when the
+  task is done -- temporary files never accumulate in the project tree.
+- **Job scripts.** A single `.sh` path passed to `hpc.slurm.submit` is rendered
+  as `bash <script>`; the script is only read by sbatch, so an uploaded file
+  needs no executable bit and `chmod` (denied on login nodes) is never part of
+  the workflow.
 
 ## Deliberate residual risk (three layers)
 

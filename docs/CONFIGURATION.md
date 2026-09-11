@@ -29,7 +29,7 @@ This document lists **every parameter the YAML config file supports**: location,
 | `sftp_bin` | string | looked up on PATH | sftp executable, same forms as `ssh_bin`. `HPC_MCP_SFTP_BIN`, `--sftp-bin` |
 | `wait_max_seconds` | int | `3600` | Maximum wait in seconds for `hpc.slurm.wait` / `wait_and_diagnose` (≤ 7 days). `HPC_MCP_WAIT_MAX_SECONDS` |
 | `cache_ttl_seconds` | float | `2.0` | TTL of the read-only query dedup cache (seconds); `0` disables it. `HPC_MCP_CACHE_TTL_SECONDS` |
-| `log_file` | string | stderr only | File to append logs to (`~` is expanded). `HPC_MCP_LOG_FILE`, `--log-file` |
+| `log_file` | string | `~/.local/share/hpc-mcp/hpc-mcp.log` | File that the append-only log + ALLOW/DENY audit trail is appended to (`~` is expanded, parent directories are created). Set `none`/`off`/`""` to keep the audit trail on stderr only. `HPC_MCP_LOG_FILE`, `--log-file` |
 | `log_level` | string | `INFO` | Log level: `DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`. `HPC_MCP_LOG_LEVEL`, `--log-level` |
 
 > `ssh.*` sub-section parameters may also be written at the top level (e.g. `connect_timeout`, `strict_host_key_checking`), which is equivalent to the `ssh:` sub-section.
@@ -177,6 +177,8 @@ topology:
 
 wait_max_seconds: 3600
 cache_ttl_seconds: 2.0
+# Append-only log + ALLOW/DENY audit trail (default path when unset).
+# Set to `none` to keep the audit trail on stderr only.
 log_file: ~/.local/share/hpc-mcp/hpc-mcp.log
 log_level: INFO
 ```

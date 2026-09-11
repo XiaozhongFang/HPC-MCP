@@ -88,6 +88,16 @@ DEFAULT_TOPOLOGY_WAIT_SECONDS = 300
 #: Slurm time limit requested for the probe job itself (it only runs lscpu).
 DEFAULT_TOPOLOGY_COLLECT_TIME_LIMIT = "00:03:00"
 
+#: Where the append-only log/audit file is written when neither the CLI
+#: (--log-file), the environment (HPC_MCP_LOG_FILE) nor the config file says
+#: otherwise.  Keeping the audit trail on disk by default is what makes it
+#: reviewable after a session: the MCP client usually swallows stderr.
+DEFAULT_LOG_FILE = "~/.local/share/hpc-mcp/hpc-mcp.log"
+
+#: Values that explicitly turn file logging off (stderr keeps the audit
+#: trail).  Accepted from the CLI, HPC_MCP_LOG_FILE and the config file.
+_LOG_FILE_DISABLED_VALUES = frozenset({"", "none", "off", "false", "0"})
+
 
 @dataclass
 class SshConfig:
@@ -187,6 +197,8 @@ class Config:
     files: FilesConfig = field(default_factory=FilesConfig)
     topology: TopologyConfig = field(default_factory=TopologyConfig)
     wait_max_seconds: int = DEFAULT_WAIT_MAX_SECONDS
+    #: Append-only log/audit file.  ``None`` disables file logging (set
+    #: ``log_file: ""`` explicitly to opt out of the default path).
     log_file: str | None = None
     log_level: str = "INFO"
     #: TTL (seconds) for the read-only query dedup cache.  0 disables caching.
@@ -207,6 +219,22 @@ class Config:
     def jobs_dir(self) -> str:
         """Remote directory for job metadata and captured output."""
         return f"{self.root.rstrip('/')}/.hpc-mcp/jobs"
+
+    @property
+    def tmp_dir(self) -> str:
+        """Remote directory for agent scratch files.
+
+        Test scripts, test logs, job wrappers and other throwaway artifacts
+        belong here (one subdirectory per task/session) instead of being
+        scattered through the project tree, so they are easy to find and to
+        remove in one ``hpc.files.delete`` call.
+        """
+        return f"{self.root.rstrip('/')}/.hpc-mcp/tmp"
+
+    def session_tmp_dir(self, session_id: str) -> str:
+        """Per-session scratch directory below :attr:`tmp_dir`."""
+        safe = "".join(ch for ch in str(session_id) if ch.isalnum() or ch in "._-") or "session"
+        return f"{self.tmp_dir}/{safe}"
 
 
 # ---------------------------------------------------------------------------
@@ -749,9 +777,16 @@ def build_config(cli_args: Any | None = None, environ: dict[str, str] | None = N
     if isinstance(cache_ttl, bool) or not isinstance(cache_ttl, (int, float)) or cache_ttl < 0 or cache_ttl > 3600:
         raise ConfigError(f"cache_ttl_seconds must be a number between 0 and 3600, got {cache_ttl!r}")
 
-    log_file = _coalesce(cli.get("log_file"), _env("LOG_FILE", env), file_data.get("log_file"))
-    if log_file:
-        log_file = str(Path(log_file).expanduser())
+    # Logs/audit records are persisted by default: --log-file /
+    # HPC_MCP_LOG_FILE / config log_file select the path, and an explicit
+    # "none"/"off"/"false"/"" disables file logging entirely (stderr only).
+    log_file_value = _coalesce(
+        cli.get("log_file"), _env("LOG_FILE", env), file_data.get("log_file"), default=DEFAULT_LOG_FILE
+    )
+    if isinstance(log_file_value, str) and log_file_value.strip().lower() in _LOG_FILE_DISABLED_VALUES:
+        log_file = None
+    else:
+        log_file = str(Path(str(log_file_value)).expanduser()) if log_file_value else None
     log_level = _coalesce(cli.get("log_level"), _env("LOG_LEVEL", env), file_data.get("log_level"), default="INFO")
     if str(log_level).upper() not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
         raise ConfigError(f"Invalid log level: {log_level!r}")

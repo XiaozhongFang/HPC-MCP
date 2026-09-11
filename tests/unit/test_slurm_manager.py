@@ -192,7 +192,30 @@ class TestSubmit:
         assert "#SBATCH --time=02:00:00" in rendered
         assert "#SBATCH --mem=32768M" in rendered
         assert "#SBATCH --gres=gpu:2" in rendered
-        assert "/proj/run.sh" in rendered
+        assert f"bash {script}" in rendered
+
+    async def test_submit_runs_script_with_bash_so_no_exec_bit_is_needed(self):
+        """An uploaded .sh has no +x and chmod is denied on the login node, so
+        the batch script must run it through bash instead of executing the
+        path directly (which would fail with 'Permission denied')."""
+        ssh = FakeSsh()
+        mgr = SlurmManager(make_cfg(), ssh, JobTracker(make_cfg(), ssh))
+        script = f"{ROOT}/.hpc-mcp/tmp/run.sh"
+        ssh.scripts[script] = "#!/bin/bash\n#SBATCH --partition=compute\n"
+        await mgr.submit(job_name="t", working_directory=ROOT, command=script)
+        rendered = ssh.submitted_scripts[0]
+        assert f"bash {script}" in rendered
+        assert rendered.rstrip().splitlines()[-1] == f"bash {script}"
+
+    async def test_explicit_bash_argv_is_not_wrapped_twice(self):
+        ssh = FakeSsh()
+        mgr = SlurmManager(make_cfg(), ssh, JobTracker(make_cfg(), ssh))
+        script = f"{ROOT}/.hpc-mcp/tmp/run.sh"
+        ssh.scripts[script] = "#!/bin/bash\n#SBATCH --partition=compute\n"
+        await mgr.submit(job_name="t", working_directory=ROOT, command=["bash", script])
+        rendered = ssh.submitted_scripts[0]
+        assert "bash bash" not in rendered
+        assert f"bash {script}" in rendered
 
     async def test_submit_explicit_args_override_script(self):
         ssh = FakeSsh()
