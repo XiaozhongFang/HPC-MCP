@@ -178,6 +178,9 @@ class Config:
     """Top-level server configuration."""
 
     root: str  # remote user root (mandatory, fail-closed if missing)
+    # Optional restart-stable ownership namespace. When unset each server
+    # process receives a fresh random session ID, preserving strict isolation.
+    job_owner_id: str | None = None
     ssh: SshConfig = field(default_factory=SshConfig)
     slurm: SlurmConfig = field(default_factory=SlurmConfig)
     shell: ShellConfig = field(default_factory=ShellConfig)
@@ -241,6 +244,10 @@ def _coalesce(*values: Any, default: Any = None) -> Any:
 
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+# A restart-stable owner namespace is deliberately opt-in. It is not a secret
+# and therefore must be an opaque, bounded token rather than a path or shell
+# fragment. Leaving it unset preserves per-process isolation.
+_JOB_OWNER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{7,63}$")
 
 
 def _mapping(data: dict[str, Any], name: str) -> dict[str, Any]:
@@ -384,6 +391,7 @@ _KNOWN_KEYS: dict[str, frozenset[str]] = {
             "port",
             "user",
             "root",
+            "job_owner_id",
             "local_root",
             "local_roots",
             "identity_file",
@@ -506,6 +514,15 @@ def build_config(cli_args: Any | None = None, environ: dict[str, str] | None = N
     root = posixpath.normpath(root)
     if root == "/":
         raise ConfigError("Root must be a dedicated user directory, not filesystem root '/'")
+
+    job_owner_id = _coalesce(
+        _env("JOB_OWNER_ID", env), file_data.get("job_owner_id")
+    )
+    if job_owner_id is not None:
+        if not isinstance(job_owner_id, str) or not _JOB_OWNER_ID.fullmatch(job_owner_id):
+            raise ConfigError(
+                "job_owner_id must be 8-64 characters using only letters, numbers, '.', '_' or '-'"
+            )
 
     # -- SSH ---------------------------------------------------------------
     ssh_file = _mapping(file_data, "ssh")
@@ -772,6 +789,7 @@ def build_config(cli_args: Any | None = None, environ: dict[str, str] | None = N
 
     return Config(
         root=root,
+        job_owner_id=job_owner_id,
         local_roots=local_roots,
         ssh=ssh,
         slurm=slurm,

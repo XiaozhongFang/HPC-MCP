@@ -50,6 +50,16 @@ class TestConfigEnv:
         assert env["HPC_MCP_ROOT"] == "/home/shared_account/alice"
         assert env["HPC_MCP_LOCAL_ROOTS"] == "/home/alice,/tmp"
 
+    def test_restart_stable_owner_is_forwarded(self):
+        cfg = Config(
+            root="/home/shared_account/alice",
+            job_owner_id="persistent-client",
+            ssh=SshConfig(host="my-hpc", user="alice", port=22),
+            local_roots=["/home/alice", "/tmp"],
+        )
+        env = _config_env(cfg)
+        assert env["HPC_MCP_JOB_OWNER_ID"] == "persistent-client"
+
 
 class TestUpsertSection:
     def test_append_when_missing(self):

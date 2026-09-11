@@ -27,6 +27,7 @@
 | `user` | string | — | SSH 用户（可为共享账号）。`HPC_MCP_USER`，`--user` |
 | `port` | int | `22` | SSH 端口（1–65535）。`HPC_MCP_PORT`，`--port` |
 | `root` | string | —（必填） | 远程**用户专属**根目录，Agent 的所有远程操作被限制在此目录内。必须是绝对路径，且不能是 `/`。`HPC_MCP_ROOT`，`--root` |
+| `job_owner_id` | string | 未设置（每进程随机） | 可选的 8–64 字符作业所有者命名空间（仅允许字母、数字、`.`、`_`、`-`）。仅应为一个明确的持久 MCP 安装设置它，使服务重启后仍能管理已跟踪的 Slurm 作业；不同客户端必须使用不同值。未设置时保持每进程隔离。`HPC_MCP_JOB_OWNER_ID` |
 | `local_root` | string | 当前工作目录 | 本地上传/下载允许的目录（可多个，见 `local_roots`）。不能是 `.ssh`/`.gnupg` 等凭据目录。`HPC_MCP_LOCAL_ROOT`，`--local-root` |
 | `local_roots` | list[string] | `[当前目录, 系统临时目录]` | 本地允许目录列表；与 `local_root` 二选一，同时出现时 `local_roots` 优先。`HPC_MCP_LOCAL_ROOTS`（逗号分隔） |
 | `identity_file` | string | 来自 `~/.ssh/config` | SSH 私钥路径（Agent 永不接触私钥内容）。`HPC_MCP_IDENTITY_FILE`，`--identity-file` |

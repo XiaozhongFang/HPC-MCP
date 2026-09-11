@@ -73,6 +73,8 @@ def _config_env(cfg: Config) -> dict[str, str]:
         "HPC_MCP_USER": cfg.ssh.user or "",
         "HPC_MCP_ROOT": cfg.root,
     }
+    if cfg.job_owner_id:
+        env["HPC_MCP_JOB_OWNER_ID"] = cfg.job_owner_id
     if cfg.ssh.port != 22:
         env["HPC_MCP_PORT"] = str(cfg.ssh.port)
     if cfg.ssh.identity_file:

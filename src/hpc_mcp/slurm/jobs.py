@@ -34,7 +34,11 @@ class JobTracker:
     def __init__(self, cfg: Config, ssh: SshManager) -> None:
         self._cfg = cfg
         self._ssh = ssh
-        self._session_id = uuid.uuid4().hex[:12]
+        # An explicit owner namespace lets a deliberately configured MCP
+        # installation survive a process restart. The default remains a
+        # fresh random ID so two independent clients sharing an account cannot
+        # manage one another's jobs accidentally.
+        self._session_id = cfg.job_owner_id or uuid.uuid4().hex[:12]
         self._jobs_dir = cfg.jobs_dir
         self._register_file = f"{cfg.root.rstrip('/')}/.hpc-mcp/tracked_jobs.json"
         self._initialized = False

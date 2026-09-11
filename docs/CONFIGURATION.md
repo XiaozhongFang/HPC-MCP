@@ -21,6 +21,7 @@ This document lists **every parameter the YAML config file supports**: location,
 | `user` | string | — | SSH user (may be a shared account). `HPC_MCP_USER`, `--user` |
 | `port` | int | `22` | SSH port (1–65535). `HPC_MCP_PORT`, `--port` |
 | `root` | string | — (required) | Remote **user-owned** root directory; all remote agent operations are confined below it. Must be an absolute path and must not be `/`. `HPC_MCP_ROOT`, `--root` |
+| `job_owner_id` | string | unset (random per process) | Optional 8–64 character owner namespace (`A-Z`, `a-z`, `0-9`, `.`, `_`, `-`). Set this only for one deliberately persistent MCP installation so tracked Slurm jobs remain manageable after a server restart. Independent clients must use different values; leaving it unset preserves per-process shared-account isolation. `HPC_MCP_JOB_OWNER_ID` |
 | `local_root` | string | current working directory | Local directory allowed for upload/download (several via `local_roots`). Cannot be a credential directory such as `.ssh`/`.gnupg`. `HPC_MCP_LOCAL_ROOT`, `--local-root` |
 | `local_roots` | list[string] | `[cwd, system temp dir]` | List of allowed local directories; alternative to `local_root`, and it wins when both are present. `HPC_MCP_LOCAL_ROOTS` (comma-separated) |
 | `identity_file` | string | from `~/.ssh/config` | SSH private-key path (the agent never touches key material). `HPC_MCP_IDENTITY_FILE`, `--identity-file` |
